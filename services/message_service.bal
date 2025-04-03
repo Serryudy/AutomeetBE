@@ -11,8 +11,7 @@ mongodb:Client mongoDb = check new ({
 });
 
 // JWT Configuration
-final string & readonly JWT_SECRET = "6be1b0ba9fd7c089e3f8ce1bdfcd97613bbe986cf45c1eaec198108bad119bcbfe2088b317efb7d30bae8e60f19311ff13b8990bae0c80b4cb5333c26abcd27190d82b3cd999c9937647708857996bb8b836ee4ff65a31427d1d2c5c59ec67cb7ec94ae34007affc2722e39e7aaca590219ce19cec690ffb7846ed8787296fd679a5a2eadb7d638dc656917f837083a9c0b50deda759d453b8c9a7a4bb41ae077d169de468ec225f7ba21d04219878cd79c9329ea8c29ce8531796a9cc01dd200bb683f98585b0f98cffbf67cf8bafabb8a2803d43d67537298e4bf78c1a05a76342a44b2cf7cf3ae52b78469681b47686352122f8f1af2427985ec72783c06e";
-//final string & readonly JWT_SECRET = "123";
+final string & readonly JWT_SECRET = "123";
 
 
 // User Type Definition
@@ -34,7 +33,6 @@ type ChatRoom record {|
     Participant[] participants;
     boolean isActive;
     string createdAt;
-    string? createdBy;
 |};
 
 // Message Type Definition
@@ -85,12 +83,9 @@ service /chat on new http:Listener(9090) {
     }
 
     // New endpoint to handle combined payload
-    resource function post send(@http:Payload json rawPayload, @http:Header {name: "Authorization"} string authHeader = "") returns json|error {
+    resource function post send(@http:Payload json rawPayload) returns json|error {
         log:printInfo("Received combined chat payload");
         log:printDebug("Raw payload: " + rawPayload.toString());
-        
-        // Get username from auth header if available
-        string? username = check self.validateAndGetUsername(authHeader);
         
         // Convert the raw JSON to the expected type with validation
         ChatPayload|error payload = rawPayload.cloneWithType(ChatPayload);
@@ -121,11 +116,9 @@ service /chat on new http:Listener(9090) {
         stream<record{}, error?> existingRoomsStream = check self.chatroomcollection->find({}, {});
         ChatRoom[] existingRooms = [];
         
-        check from record{} room in existingRoomsStream
+        check from record {} room in existingRoomsStream
             do {
-                json roomJson = room.toJson();
-                ChatRoom chatRoom = check roomJson.cloneWithType(ChatRoom);
-                existingRooms.push(chatRoom);
+                existingRooms.push(<ChatRoom>room);
             };
         
         // Check if there's an exact match of participants
@@ -165,8 +158,7 @@ service /chat on new http:Listener(9090) {
                 id: roomId,
                 participants: payload.participants,
                 isActive: true,
-                createdAt: time:utcNow().toString(),
-                createdBy: username
+                createdAt: time:utcNow().toString()
             };
             
             log:printInfo(string `Creating new chat room with ID: ${roomId}`);
@@ -205,33 +197,14 @@ service /chat on new http:Listener(9090) {
     }
 
     // Get all chat rooms
-    resource function get chatrooms(@http:Header {name: "Authorization"} string authHeader = "") returns json|error {
+    resource function get chatrooms() returns json|error {
         log:printInfo("Fetching all chat rooms");
         
-        // Get username from auth header if available
-        string? username = check self.validateAndGetUsername(authHeader);
-        
-        // Create filter based on username if available
-        stream<record{}, error?> chatRoomsStream;
-        
-        if username is string {
-            map<json> filter = {
-                "createdBy": username
-            };
-            log:printInfo(string `Filtering chat rooms for user: ${username}`);
-            chatRoomsStream = check self.chatroomcollection->find(filter, {});
-        } else {
-            // If no username, get all chat rooms (empty filter)
-            log:printInfo("No username provided, fetching all chat rooms");
-            chatRoomsStream = check self.chatroomcollection->find({}, {});
-        }
-        
+        stream<ChatRoom, error?> chatRoomsStream = check self.chatroomcollection->find({}, {});
         ChatRoom[] chatRooms = [];
         
-        check from record{} roomData in chatRoomsStream
+        check from ChatRoom chatRoom in chatRoomsStream
             do {
-                json roomJson = roomData.toJson();
-                ChatRoom chatRoom = check roomJson.cloneWithType(ChatRoom);
                 chatRooms.push(chatRoom);
             };
             
@@ -254,11 +227,8 @@ service /chat on new http:Listener(9090) {
     }
     
     // Get messages for a specific chat room
-    resource function get messages/[string roomId](@http:Header {name: "Authorization"} string authHeader = "") returns json|error {
+    resource function get messages/[string roomId]() returns json|error {
         log:printInfo(string `Fetching messages for room: ${roomId}`);
-        
-        // Get username from auth header if available
-        string? username = check self.validateAndGetUsername(authHeader);
         
         // Check if room exists
         ChatRoom? chatRoom = check self.chatroomcollection->findOne({id: roomId}, {});
@@ -267,67 +237,16 @@ service /chat on new http:Listener(9090) {
             return error("Chat room not found");
         }
         
-        // Create filter based on roomId and optionally senderId if username is available
-        map<json> filter = {
-            "roomId": roomId
-        };
-        
-        if username is string {
-            // Additional filtering could be applied here if needed
-            // Example: filter["senderId"] = username;
-            // Currently keeping all messages in the room regardless of sender
-        }
-        
-        stream<record{}, error?> messagesStream = check self.messagecollection->find(filter, {});
+        stream<Message, error?> messagesStream = check self.messagecollection->find({roomId: roomId}, {});
         Message[] messages = [];
         
-        check from record{} messageData in messagesStream
+        check from Message message in messagesStream
             do {
-                json messageJson = messageData.toJson();
-                Message message = check messageJson.cloneWithType(Message);
                 messages.push(message);
             };
             
         log:printInfo(string `Found ${messages.length()} messages for room ${roomId}`);
         return messages.toJson();
-    }
-
-    // Get user's chat rooms
-    resource function get mychats(@http:Header {name: "Authorization"} string authHeader) returns json|error {
-        log:printInfo("Fetching user's chat rooms");
-        
-        // Get username from auth header
-        string? username = check self.validateAndGetUsername(authHeader);
-        
-        if username is () {
-            log:printError("Unauthorized access to mychats");
-            return {
-                "error": true,
-                "message": "Authentication required"
-            };
-        }
-        
-        // Create filter to find rooms where the user is a participant
-        map<json> filter = {
-            "participants": {
-                "$elemMatch": {
-                    "username": username
-                }
-            }
-        };
-        
-        stream<record{}, error?> chatRoomsStream = check self.chatroomcollection->find(filter, {});
-        ChatRoom[] chatRooms = [];
-        
-        check from record{} roomData in chatRoomsStream
-            do {
-                json roomJson = roomData.toJson();
-                ChatRoom chatRoom = check roomJson.cloneWithType(ChatRoom);
-                chatRooms.push(chatRoom);
-            };
-            
-        log:printInfo(string `Found ${chatRooms.length()} chat rooms for user ${username}`);
-        return chatRooms.toJson();
     }
 
     function validateAndGetUsername(string authHeader) returns string?|error {
