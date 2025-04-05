@@ -89,6 +89,8 @@ service /chat on new http:Listener(9090) {
     mongodb:Collection messagecollection;
     mongodb:Collection usercollection;
 
+    
+
     function init() returns error? {
         log:printInfo("Initializing chat service and connecting to MongoDB...");
 
