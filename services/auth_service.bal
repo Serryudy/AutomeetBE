@@ -6,15 +6,16 @@ import ballerina/time;
 import ballerina/url;
 import ballerina/uuid;
 
-// Extended User record definition with Google ID field
+// Extended User record definition with name field
 type User record {
     string username;
+    string name;
     string password;
     boolean isadmin = false;
     string role = ""; 
     string phone_number = "";
     string profile_pic = "";
-    string googleid = ""; // Added Google ID field
+    string googleid = "";
 };
 
 // Login request payload
@@ -35,6 +36,7 @@ type GoogleLoginRequest record {
 type LoginResponse record {
     string token;
     string username;
+    string name;        // Added name to response
     boolean isadmin;
     string role;
 };
@@ -80,6 +82,16 @@ service /auth on new http:Listener(8080) {
         
         // Convert JSON to User type with proper error handling
         User userDetails = check signupPayload.cloneWithType(User);
+        
+        // Validate required fields
+        if (userDetails.name == "") {
+            log:printError("Name is required");
+            http:Response badRequestResponse = new;
+            badRequestResponse.statusCode = 400;
+            badRequestResponse.setJsonPayload({"error": "Name is required"});
+            check caller->respond(badRequestResponse);
+            return;
+        }
 
         // Check if the user already exists in the collection using username field
         map<json> filter = {"username": userDetails.username};
@@ -142,6 +154,7 @@ service /auth on new http:Listener(8080) {
         LoginResponse loginResponse = {
             token: token,
             username: user.username,
+            name: user.name,        // Include name in response
             isadmin: user.isadmin,
             role: user.role
         };
@@ -176,6 +189,7 @@ service /auth on new http:Listener(8080) {
             // User doesn't exist - create a new account
             user = {
                 username: googleDetails.email, // Using email as username
+                name: googleDetails.name,      // Use the name from Google account
                 password: uuid:createType1AsString(), // Generate random password for security
                 googleid: googleDetails.googleid,
                 profile_pic: googleDetails.picture
@@ -197,6 +211,7 @@ service /auth on new http:Listener(8080) {
         LoginResponse loginResponse = {
             token: token,
             username: user.username,
+            name: user.name,        // Include name in response
             isadmin: user.isadmin,
             role: user.role
         };
@@ -258,6 +273,7 @@ service /auth on new http:Listener(8080) {
         
         string googleId = check userInfo.id;
         string email = check userInfo.email;
+        string name = check userInfo.name;  // Get user's name from Google profile
         string? picture = check userInfo.picture;
         
         // Check if user already exists with this Google ID
@@ -271,6 +287,7 @@ service /auth on new http:Listener(8080) {
             // Create a new user
             user = {
                 username: email,
+                name: name,  // Use the name from Google profile
                 password: uuid:createType1AsString(), // Generate random password
                 googleid: googleId,
                 profile_pic: picture is string ? picture : ""
@@ -294,6 +311,7 @@ service /auth on new http:Listener(8080) {
                 // Store the token and redirect
                 localStorage.setItem('auth_token', '${token}');
                 localStorage.setItem('username', '${user.username}');
+                localStorage.setItem('name', '${user.name}');  // Store user's name
                 localStorage.setItem('isadmin', '${user.isadmin}');
                 localStorage.setItem('role', '${user.role}');
                 window.location.href = '/dashboard'; // Redirect to your application's dashboard
@@ -324,6 +342,7 @@ service /auth on new http:Listener(8080) {
                 config: JWT_SECRET
             },
             customClaims: {
+                "name": user.name,      // Include name in JWT token
                 "isadmin": user.isadmin,
                 "role": user.role
             }
