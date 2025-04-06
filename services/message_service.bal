@@ -1,6 +1,7 @@
 import ballerina/http;
 import ballerina/jwt;
 import ballerina/log;
+import ballerina/regex;
 import ballerina/time;
 import ballerina/uuid;
 import ballerinax/mongodb;
@@ -331,146 +332,201 @@ service /chat on new http:Listener(9090) {
                 ChatRoom|error chatRoom = room.cloneWithType(ChatRoom);
 
                 if chatRoom is ChatRoom {
-                    // Get the most recent message for this chat room
-                    record {|
-                        string content;
-                        string senderId;
-                        string senddate;
-                        string sendtime;
-                    |}? latestMessage = check self.messagecollection->findOne(
+                    // Get all messages for this room
+                    stream<record {}, error?> messagesStream = check self.messagecollection->find(
                     {roomId: chatRoom.id},
-                    {
-                        projection: {content: 1, senderId: 1, senddate: 1, sendtime: 1, _id: 0},
-                        sort: {senddate: -1, sendtime: -1}
-                    }
+                    {}
                     );
 
-                    if latestMessage is () {
-                        // Skip rooms with no messages - use continue instead of return
-                        continue;
-                    }
+                    // Collect messages to find the latest one manually
+                    Message[] roomMessages = [];
+                    check from record {} msgRecord in messagesStream
+                        do {
+                            Message|error msgConversion = msgRecord.cloneWithType(Message);
+                            if msgConversion is Message {
+                                roomMessages.push(msgConversion);
+                            }
+                        };
 
-                    // Format message time according to requirements
-                    string formattedTime = "";
-                    string sortableTimestamp = "";
+                    // Skip if no messages
+                    if roomMessages.length() > 0 {
+                        // Find the latest message manually without using sort
+                        Message latestMessage = roomMessages[0];
+                        foreach Message msg in roomMessages {
+                            if msg.senddate > latestMessage.senddate ||
+                            (msg.senddate == latestMessage.senddate && msg.sendtime > latestMessage.sendtime) {
+                                latestMessage = msg;
+                            }
+                        }
 
-                    // Parse date from the message
-                    time:Civil msgDate = check time:civilFromString(latestMessage.senddate);
-                    time:Civil today = check time:civilFromString(time:utcToString(time:utcNow()).substring(0, 10));
+                        // Format message time according to requirements
+                        string formattedTime = "";
+                        string sortableTimestamp = "";
 
-                    // Calculate if message is from today, yesterday, or earlier
-                    int dayDiff = time:daysFrom(msgDate.year, msgDate.month, msgDate.day) -
-                            time:daysFrom(today.year, today.month, today.day);
+                        // Parse date from the message
+                        string[] dateParts = regex:split(latestMessage.senddate, "-");
+                        time:Civil msgDate = {
+                            year: check int:fromString(dateParts[0]),
+                            month: check int:fromString(dateParts[1]),
+                            day: check int:fromString(dateParts[2]),
+                            hour: 0,
+                            minute: 0,
+                            second: 0,
+                            timeAbbrev: "UTC",
+                            utcOffset: {
+                                hours: 0,
+                                minutes: 0
+                            }
+                        };
 
-                    if dayDiff == 0 {
-                        // If today, show time (HH:MM AM/PM)
-                        string[] timeParts = latestMessage.sendtime.split(":");
-                        int hour = check int:fromString(timeParts[0]);
-                        string minute = timeParts[1];
-                        string ampm = hour >= 12 ? "PM" : "AM";
-                        hour = hour > 12 ? hour - 12 : (hour == 0 ? 12 : hour);
-                        formattedTime = string `${hour}:${minute} ${ampm}`;
-                    } else if dayDiff == -1 {
-                        // If yesterday
-                        formattedTime = "Yesterday";
-                    } else {
-                        // String[] months was missing quotes around month names
-                        string[] months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-                        formattedTime = string `${months[msgDate.month - 1]} ${msgDate.day}`;
-                    }
+                        // Get today's date
+                        time:Civil nowCivil = time:utcToCivil(time:utcNow());
+                        time:Civil today = {
+                            year: nowCivil.year,
+                            month: nowCivil.month,
+                            day: nowCivil.day,
+                            hour: 0,
+                            minute: 0,
+                            second: 0,
+                            timeAbbrev: "UTC",
+                            utcOffset: {
+                                hours: 0,
+                                minutes: 0
+                            }
+                        };
+                        // Calculate if message is from today, yesterday, or earlier
+                        // Create time:Utc objects from the civil dates to calculate the difference
+                        time:Utc msgDateUtc = check time:utcFromCivil(msgDate);
+                        time:Utc todayUtc = check time:utcFromCivil(today);
 
-                    // Create a sortable timestamp (for ordering messages by recency)
-                    sortableTimestamp = string `${latestMessage.senddate} ${latestMessage.sendtime}`;
+                        // Calculate day difference (truncate time portion by converting to days)
+                        time:Seconds diffInSeconds = time:utcDiffSeconds(msgDateUtc, todayUtc);
+                        int dayDiff = <int>diffInSeconds / (24 * 60 * 60);
 
-                    // Handle participant info based on count
-                    boolean isTeam = chatRoom.participants.length() > 2;
-                    string otherName = "";
-                    string otherProfileUrl = "/profile.png"; // Default profile image
+                        if dayDiff == 0 {
+                            // If today, show time (HH:MM AM/PM)
+                            string[] timeParts = regex:split(latestMessage.sendtime, ":");
+                            int hour = check int:fromString(timeParts[0]);
+                            string minute = timeParts[1];
+                            string ampm = hour >= 12 ? "PM" : "AM";
+                            hour = hour > 12 ? hour - 12 : (hour == 0 ? 12 : hour);
+                            formattedTime = string `${hour}:${minute} ${ampm}`;
+                        } else if dayDiff == -1 {
+                            // If yesterday
+                            formattedTime = "Yesterday";
+                        } else {
+                            // For older messages
+                            string[] months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+                            formattedTime = string `${months[msgDate.month - 1]} ${msgDate.day}`;
+                        }
 
-                    if chatRoom.participants.length() == 2 {
-                        // Find the other participant (not the logged-in user)
-                        foreach var participant in chatRoom.participants {
-                            if participant.username != username {
-                                // Get other user's details - the USER collection field names were incorrect
-                                record {|string name; string? profileImage;|}? otherUser = check self.usercollection->findOne(
-                                {email: participant.username},  // Changed username to email based on User record type
-                                {projection: {name: 1, profileImage: 1, _id: 0}}
-                                );
+                        // Create a sortable timestamp (for ordering messages by recency)
+                         sortableTimestamp = string `${latestMessage.senddate} ${latestMessage.sendtime}`;
 
-                                if otherUser is record {|string name; string? profileImage;|} {
-                                    otherName = otherUser.name;
-                                    // Use the profile image if available, otherwise keep default
-                                    if otherUser.profileImage is string {
-                                        otherProfileUrl = <string>otherUser.profileImage;
+                        // Handle participant info based on count
+                        boolean isTeam = chatRoom.participants.length() > 2;
+                        string otherName = "User"; // Default name in case we can't find user details
+                        string otherProfileUrl = "/profile.png"; // Default profile image
+
+                        if chatRoom.participants.length() == 2 {
+                            // Find the other participant (not the logged-in user)
+                            boolean foundOtherUser = false;
+                            foreach var participant in chatRoom.participants {
+                                if participant.username != username {
+                                    foundOtherUser = true;
+                                    // Get other user's details
+                                    record {}? userRecord = check self.usercollection->findOne(
+                                    {email: participant.username},
+                                    {}
+                                    );
+
+                                    if userRecord is record {} {
+                                        User|error user = userRecord.cloneWithType(User);
+                                        if user is User {
+                                            // Set the name, using a default if name is empty
+                                            if user.name != "" {
+                                                otherName = user.name;
+                                            }
+                                            // Use the profile image if available, otherwise keep default
+                                            if user.profileImage is string && (<string>user.profileImage) != "" {
+                                                otherProfileUrl = <string>user.profileImage;
+                                            }
+                                        } else {
+                                            log:printError("Error converting user record", 'error = user);
+                                        }
+                                    } else {
+                                        log:printError("User record not found for: " + participant.username);
                                     }
+                                    break;
                                 }
-                                break;
                             }
-                        }
-                    } else {
-                        // For group chats, use a dynamic group name
-                        string[] participantNames = [];
-                        int count = 0;
-                        foreach var participant in chatRoom.participants {
-                            if count < 2 && participant.username != username {
-                                record {|string name;|}? user = check self.usercollection->findOne(
-                                {email: participant.username},
-                                {projection: {name: 1, _id: 0}}
-                                );
-                                if user is record {|string name;|} {
-                                    participantNames.push(user.name);
-                                }
-                                count += 1;
-                            }
-                        }
 
-                        if participantNames.length() > 0 {
-                            otherName = string:'join(" & ", ...participantNames);
-                            if chatRoom.participants.length() > 3 {
-                                otherName += string ` & ${chatRoom.participants.length() - 3} others`;
+                            if !foundOtherUser {
+                                log:printError("Could not find the other user in a 2-person chat");
                             }
                         } else {
-                            otherName = "Group Chat"; // Fallback name
+                            // For group chats, simply use "Group" as the name
+                            otherName = "Group";
                         }
-                    }
 
-                    // Create the chat list entry
-                    ChatListEntry chatEntry = {
-                        id: tempCounter,
-                        sender: otherName,
-                        avatar: otherProfileUrl, // Always provide an avatar
-                        message: latestMessage.content,
-                        time: formattedTime,
-                        isTeam: isTeam
-                    };
+                        // Create the chat list entry
+                        ChatListEntry chatEntry = {
+                            id: tempCounter,
+                            sender: otherName,
+                            avatar: otherProfileUrl,
+                            message: latestMessage.content,
+                            time: formattedTime,
+                            isTeam: isTeam
+                        };
 
-                    // Add to array with timestamp for sorting
-                    chatEntries.push({
-                        tempId: tempCounter,
-                        lastMsgTimestamp: sortableTimestamp,
-                        entry: chatEntry
-                    });
-                    tempCounter += 1;
+                        // Add to array with timestamp for sorting
+                        chatEntries.push({
+                            tempId: tempCounter,
+                            lastMsgTimestamp: sortableTimestamp,
+                            entry: chatEntry
+                        });
+                        tempCounter += 1;
+                    } // End of if roomMessages.length() > 0
                 }
             };
 
-        // Sort chat entries by timestamp (most recent first)
-        chatEntries.sort(function(record {|int tempId; string lastMsgTimestamp; ChatListEntry entry;|} a,
-                record {|int tempId; string lastMsgTimestamp; ChatListEntry entry;|} b) returns int {
-            return a.lastMsgTimestamp > b.lastMsgTimestamp ? -1 : 1;
-        });
+        // Need to sort chat entries by timestamp manually
+        // First, create a copy of the array that we can modify
+        record {|
+            int tempId;
+            string lastMsgTimestamp;
+            ChatListEntry entry;
+        |}[] sortedEntries = [];
 
-        // Create final array
+        // Copy all entries to the new array
+        foreach var entry in chatEntries {
+            sortedEntries.push(entry);
+        }
+
+        // Bubble sort the entries by timestamp (most recent first)
+        int n = sortedEntries.length();
+        foreach int i in 0 ..< n - 1 {
+            foreach int j in 0 ..< n - i - 1 {
+                if sortedEntries[j].lastMsgTimestamp < sortedEntries[j + 1].lastMsgTimestamp {
+                    // Swap the entries
+                    var temp = sortedEntries[j];
+                    sortedEntries[j] = sortedEntries[j + 1];
+                    sortedEntries[j + 1] = temp;
+                }
+            }
+        }
+
+        // Create final array with sequential IDs
         ChatListEntry[] sortedChatList = [];
         int idCounter = 1;
-        foreach var chatData in chatEntries {
+        foreach var chatData in sortedEntries {
             chatData.entry.id = idCounter;
             sortedChatList.push(chatData.entry);
             idCounter += 1;
         }
 
         return sortedChatList.toJson();
-    }
+        }
 
     function validateAndGetUsername(string authHeader) returns string?|error {
         // Check if the Authorization header is present and properly formatted
