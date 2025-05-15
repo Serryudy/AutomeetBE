@@ -29,6 +29,7 @@ public mongodb:Collection notificationSettingsCollection = getCollectionRef("not
 public mongodb:Collection temporarySuggestionsCollection = getCollectionRef("temporarysuggestions");
 public mongodb:Collection chatroomCollection = getCollectionRef("chatrooms");
 public mongodb:Collection messageCollection = getCollectionRef("messages");
+public mongodb:Collection transcriptCollection = getCollectionRef("transcripts");
 
 // Initialize MongoDB client - handles the error internally
 function initMongoDbClient() returns mongodb:Client {
