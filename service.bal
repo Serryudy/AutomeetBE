@@ -219,21 +219,17 @@ type RoundRobinMeetingRequest record {
     string repeat = "none";
 };
 
-// Error response record
-type ErrorResponse record {
-    string message;
-    int statusCode;
-};
+
 
 // Google OAuth config - add your client values in production
-configurable string googleClientId = "751259024059-q80a9la618pq41b7nnua3gigv29e0f46.apps.googleusercontent.com";
-configurable string googleClientSecret = "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";
+configurable string googleClientId = "dummy-q80a9la618pq41b7nnua3gigv29e0f46.apps.googleusercontent.com";
+configurable string googleClientSecret = "dummy-686bY0GTXkbzkohKIvOAoghKZ26l";
 configurable string googleRedirectUri = "http://localhost:8080/api/auth/google/callback";
 configurable string googleCalendarRedirectUri = "http://localhost:8080/api/auth/google/calendar/callback";
 configurable string frontendBaseUrl = "http://localhost:3000";
 
 // JWT signing key - in production, this should be in a secure configuration
-final string & readonly JWT_SECRET = "6be1b0ba9fd7c089e3f8ce1bdfcd97613bbe986cf45c1eaec198108bad119bcbfe2088b317efb7d30bae8e60f19311ff13b8990bae0c80b4cb5333c26abcd27190d82b3cd999c9937647708857996bb8b836ee4ff65a31427d1d2c5c59ec67cb7ec94ae34007affc2722e39e7aaca590219ce19cec690ffb7846ed8787296fd679a5a2eadb7d638dc656917f837083a9c0b50deda759d453b8c9a7a4bb41ae077d169de468ec225f7ba21d04219878cd79c9329ea8c29ce8531796a9cc01dd200bb683f98585b0f98cffbf67cf8bafabb8a2803d43d67537298e4bf78c1a05a76342a44b2cf7cf3ae52b78469681b47686352122f8f1af2427985ec72783c06e";
+final string & readonly JWT_SECRET = "dummy";
 
 // Function to hash passwords using SHA-256
 function hashPassword(string password) returns string {
@@ -4711,6 +4707,70 @@ service /api on new http:Listener(8080) {
         http:Response response = new;
         response.setJsonPayload(statusResponse.toJson());
         check caller->respond(response);
+    }
+
+    // get user with username given 
+    resource function get users/[string usernameParam](http:Request req) returns User|ErrorResponse|error {
+        // Extract username from cookie for authorization
+        string? requestingUsername = check self.validateAndGetUsernameFromCookie(req);
+        if requestingUsername is () {
+            return {
+                message: "Unauthorized: Invalid or missing authentication token",
+                statusCode: 401
+            };
+        }
+        
+        // Create a filter to find the requested user
+        map<json> filter = {
+            "username": usernameParam
+        };
+        
+        // Get user data
+        record {}|() userRecord = check mongodb:userCollection->findOne(filter);
+        if userRecord is () {
+            return {
+                message: "User not found",
+                statusCode: 404
+            };
+        }
+        
+        // Convert to User type
+        json userJson = userRecord.toJson();
+        User user = check userJson.cloneWithType(User);
+        
+        // Remove sensitive information
+        user.password = "";
+        
+        // If not admin and not the same user, only return basic user profile info
+        if requestingUsername != usernameParam && !user.isadmin {
+            // Create a new User object with limited fields
+            // Keep the required structure by creating a new User object
+            User limitedUser = {
+                username: user.username,
+                name: user.name,
+                password: "", // Required field but set to empty
+                profile_pic: user.profile_pic,
+                bio: user.bio,
+                industry: user.industry,
+                company: user.company,
+                is_available: user.is_available,
+                calendar_connected: user.calendar_connected,
+                isadmin: false, // Set default values for other fields
+                role: "",
+                phone_number: "",
+                googleid: "",
+                mobile_no: "",
+                time_zone: "",
+                social_media: "",
+                refresh_token: "",
+                email_refresh_token: ""
+            };
+            
+            return limitedUser;
+        }
+        
+        // Return the full user record to the requesting user or admin
+        return user;
     }
     
     // Utility method to verify calendar access with the given access token
