@@ -3996,60 +3996,110 @@ service /api on new http:Listener(8080) {
     }
     
     resource function post auth/signup(http:Caller caller, http:Request req) returns error? {
-        // Parse the JSON payload from the request body
-        json signupPayload = check req.getJsonPayload();
-        
-        // Log redacted payload for security (we'll omit the password entirely)
-        log:printInfo("New signup request received for user: " + (signupPayload.username is string ? (check signupPayload.username).toString() : "unknown"));
-        
-        // Convert JSON to SignupRequest type with proper error handling
-        SignupRequest signupDetails = check signupPayload.cloneWithType(SignupRequest);
-        
-        // Validate required fields
-        if (signupDetails.username == "" || signupDetails.name == "" || signupDetails.password == "") {
-            log:printError("Missing required fields for signup");
-            http:Response badRequestResponse = new;
-            badRequestResponse.statusCode = 400; // Bad Request status code
-            badRequestResponse.setJsonPayload({"error": "Username, name, and password are required fields"});
-            check caller->respond(badRequestResponse);
-            return;
-        }
-
-        // Check if the user already exists in the collection using username field
-        map<json> filter = {"username": signupDetails.username};
-        stream<User, error?> userStream = check mongodb:userCollection->find(filter);
-        record {|User value;|}? existingUser = check userStream.next();
-        
-        if (existingUser is record {|User value;|}) {
-            log:printError("User already exists");
-            http:Response conflictResponse = new;
-            conflictResponse.statusCode = 409; // Conflict status code
-            conflictResponse.setJsonPayload({"error": "User already exists"});
-            check caller->respond(conflictResponse);
-            return;
-        }
-        
-        // Hash the password before storing
-        string originalPassword = signupDetails.password;
-        string hashedPassword = hashPassword(originalPassword);
-        
-        // Create a new User record with only the required fields
-        User newUser = {
-            username: signupDetails.username,
-            name: signupDetails.name,
-            password: hashedPassword
-            // All other fields will use their default values
-        };
-        
-        // Insert the new user into the MongoDB collection
-        check mongodb:userCollection->insertOne(newUser);
-
-        // Send a success response
-        http:Response response = new;
-        response.statusCode = 201; // Created status code
-        response.setJsonPayload({"message": "User signed up successfully"});
-        check caller->respond(response);
+    // Parse the JSON payload from the request body
+    json signupPayload = check req.getJsonPayload();
+    
+    // Log redacted payload for security (we'll omit the password entirely)
+    log:printInfo("New signup request received for user: " + (signupPayload.username is string ? (check signupPayload.username).toString() : "unknown"));
+    
+    // Extract all possible fields from the frontend payload
+    string username = check signupPayload.username.ensureType();
+    string password = check signupPayload.password.ensureType();
+    
+    // Handle the name field - we'll look for it in the payload, but it might be missing
+    string name = "";
+    if (signupPayload.name is string) {
+        name = check signupPayload.name.ensureType();
     }
+    
+    // Use defaults for other potentially missing fields
+    boolean isAdmin = false;
+    if (signupPayload.isadmin is boolean) {
+        isAdmin = check signupPayload.isadmin.ensureType();
+    }
+    
+    string role = "";
+    if (signupPayload.role is string) {
+        role = check signupPayload.role.ensureType();
+    }
+    
+    string phoneNumber = "";
+    if (signupPayload.phone_number is string) {
+        phoneNumber = check signupPayload.phone_number.ensureType();
+    }
+    
+    string profilePic = "";
+    if (signupPayload.profile_pic is string) {
+        profilePic = check signupPayload.profile_pic.ensureType();
+    }
+    
+    // Validate required fields
+    if (username == "" || password == "") {
+        log:printError("Missing required fields for signup");
+        http:Response badRequestResponse = new;
+        badRequestResponse.statusCode = 400; // Bad Request status code
+        badRequestResponse.setJsonPayload({"error": "Username and password are required fields"});
+        check caller->respond(badRequestResponse);
+        return;
+    }
+    
+    // If name is not provided, use username as name
+    if (name == "") {
+        name = username;
+    }
+
+    // Check if the user already exists in the collection using username field
+    map<json> filter = {"username": username};
+    stream<User, error?> userStream = check mongodb:userCollection->find(filter);
+    record {|User value;|}? existingUser = check userStream.next();
+    
+    if (existingUser is record {|User value;|}) {
+        log:printError("User already exists");
+        http:Response conflictResponse = new;
+        conflictResponse.statusCode = 409; // Conflict status code
+        conflictResponse.setJsonPayload({"error": "User already exists"});
+        check caller->respond(conflictResponse);
+        return;
+    }
+    
+    // Hash the password before storing
+    string hashedPassword = hashPassword(password);
+    
+    // Create a new User record with the extracted fields
+    User newUser = {
+        username: username,
+        name: name,
+        password: hashedPassword
+        // All other fields will use their default values
+    };
+    
+    // If there are additional fields in User type that we want to set
+    if (role != "") {
+        newUser.role = role;
+    }
+    
+    if (phoneNumber != "") {
+        newUser["phone_number"] = phoneNumber;
+    }
+    
+    if (profilePic != "") {
+        newUser["profile_pic"] = profilePic;
+    }
+    
+    // Set isAdmin if it's part of the User type
+    if (isAdmin) {
+        newUser["isadmin"] = isAdmin;
+    }
+    
+    // Insert the new user into the MongoDB collection
+    check mongodb:userCollection->insertOne(newUser);
+
+    // Send a success response
+    http:Response response = new;
+    response.statusCode = 201; // Created status code
+    response.setJsonPayload({"message": "User signed up successfully"});
+    check caller->respond(response);
+}
     
     resource function post auth/login(http:Caller caller, http:Request req) returns error? {
     // Parse the JSON payload from the request body
