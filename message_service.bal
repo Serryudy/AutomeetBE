@@ -60,7 +60,7 @@ map<websocket:Caller> connections = {};
 map<string[]> userRooms = {}; // Map of connectionId -> array of roomIds
 map<string> connectionUsers = {}; // Map of connectionId -> userId
 
-// JWT validation configurations
+//JWT validation configurations
 configurable string jwtIssuer = "automeet";
 configurable string jwtAudience = "automeet-app";
 configurable string jwtSigningKey = "dummy"; // Should be securely stored
