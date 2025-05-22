@@ -10,220 +10,10 @@ import ballerina/regex;
 import ballerina/io;
 import mongodb_atlas_app.mongodb;
 
-type MeetingType "direct" | "group" | "round_robin";
-type NotificationType "creation" | "cancellation" | "confirmation" | "availability_request";
-type MeetingStatus "pending" | "confirmed" | "canceled";
-
-// Extended User record definition with calendar connection fields
-type User record {
-    string username;
-    string name = "";
-    string password;
-    boolean isadmin = false;
-    string role = ""; 
-    string phone_number = "";
-    string profile_pic = "";
-    string googleid = "";
-    string bio = "";
-    string mobile_no = "";
-    string time_zone = "";
-    string social_media = "";
-    string industry = "";
-    string company = "";
-    boolean is_available = true;
-    boolean calendar_connected = false;
-    string refresh_token = "";
-    string email_refresh_token = "";
-};
-
-type RefreshTokenRequest record {
-    string refresh_token;
-};
-
-type TokenResponse record {
-    string access_token;
-    string refresh_token;
-};
-
-// Simplified SignupRequest to only include required fields
-type SignupRequest record {
-    string username;
-    string name;
-    string password;
-};
-
-// Login request payload
-type LoginRequest record {
-    string username;
-    string password;
-};
-
-// Google login request payload
-type GoogleLoginRequest record {
-    string googleid;
-    string email;
-    string name;
-    string picture = "";
-};
-
-// Login response with user info (no token since it will be in cookie)
-type LoginResponse record {
-    string username;
-    string name;
-    boolean isadmin;
-    string role;
-    boolean success;
-    boolean calendar_connected;
-};
-
-// Calendar connection status response
-type CalendarConnectionResponse record {
-    boolean connected;
-    string message;
-};
-
-type EmailConfig record {
-    string host;
-    string username;
-    string password;
-    int port = 465;  // Default port for SSL
-    string frontendUrl = "http://localhost:3000"; // Frontend URL for links
-};
-
-
-type MeetingParticipant record {
-    string username;
-    string access = "pending"; // can be "pending", "accepted", "declined"
-};
-
-type MeetingAssignment record {
-    string id;
-    string username;  // Changed from userId
-    string meetingId;
-    boolean isAdmin;
-};
-
-type Notification record {
-    string id;
-    string title;
-    string message;
-    NotificationType notificationType;
-    string meetingId;
-    string[] toWhom; // Array of usernames who should receive this notification
-    string createdAt; // ISO format timestamp
-    boolean isRead = false;
-};
-
-type ParticipantAvailability record {
-    string id;
-    string username;
-    string meetingId;
-    TimeSlot[] timeSlots;
-    string submittedAt; // ISO format timestamp
-};
-
-type TimeSlot record {
-    string startTime;
-    string endTime;
-    boolean isBestTimeSlot?; // Optional field to mark the best time slot
-};
-
-type Meeting record {
-    string id;
-    string title;
-    string location;
-    MeetingType meetingType;
-    MeetingStatus status = "pending";
-    
-    // Common fields
-    string description;
-    string createdBy;
-    string repeat = "none"; // can be "none", "daily", "weekly", "monthly", "yearly"
-    
-    // Type-specific fields - made optional
-    TimeSlot? directTimeSlot?;
-    string? deadline?; // Deadline for marking availability (ISO format)
-    
-    string? groupDuration?;
-    string? roundRobinDuration?;
-    
-    MeetingParticipant[]? hosts?;
-    MeetingParticipant[]? participants?;
-};
-
-type Contact record {
-    string id;
-    string username;
-    string email;
-    string phone;
-    string profileimg = "";
-    string createdBy;
-};
-
-type NotificationSettings record {
-    string id;
-    string username;
-    boolean notifications_enabled = true;
-    boolean email_notifications = false;
-    boolean sms_notifications = false;
-    string createdAt;
-    string updatedAt;
-};
-
-type EmailTemplate record {
-    string subject;
-    string bodyTemplate;
-};
-
-type Availability record {
-    string id;
-    string username;
-    string meetingId;
-    TimeSlot[] timeSlots;
-};
-
-type Group record {
-    string id;
-    string name;
-    string[] contactIds;
-    string createdBy;
-};
-
-type DirectMeetingRequest record {
-    string title;
-    string location;
-    string description;
-    TimeSlot directTimeSlot;
-    string[] participantIds;
-    string repeat = "none";
-};
-
-type GroupMeetingRequest record {
-    string title;
-    string location;
-    string description;
-    TimeSlot[] groupTimeSlots;
-    string groupDuration;
-    string[] participantIds;
-    string repeat = "none";
-};
-
-type RoundRobinMeetingRequest record {
-    string title;
-    string location;
-    string description;
-    TimeSlot[] roundRobinTimeSlots;
-    string roundRobinDuration;
-    string[] hostIds;
-    string[] participantIds;
-    string repeat = "none";
-};
-
-
 
 // Google OAuth config - add your client values in production
-configurable string googleClientId = "dummy-q80a9la618pq41b7nnua3gigv29e0f46.apps.googleusercontent.com";
-configurable string googleClientSecret = "dummy-686bY0GTXkbzkohKIvOAoghKZ26l";
+configurable string googleClientId = "q80a9la618pq41b7nnua3gigv29e0f46.apps.googleusercontent.com";
+configurable string googleClientSecret = "686bY0GTXkbzkohKIvOAoghKZ26l";
 configurable string googleRedirectUri = "http://localhost:8080/api/auth/google/callback";
 configurable string googleCalendarRedirectUri = "http://localhost:8080/api/auth/google/calendar/callback";
 configurable string frontendBaseUrl = "http://localhost:3000";
@@ -1220,6 +1010,180 @@ service /api on new http:Listener(8080) {
         }
         
         return sortedMeetings;
+    }
+
+    // meeting content
+    resource function post meetings/[string meetingId]/content(http:Request req) returns MeetingContent|ErrorResponse|error {
+        // Extract username from cookie
+        string? username = check self.validateAndGetUsernameFromCookie(req);
+        if username is () {
+            return {
+                message: "Unauthorized: Invalid or missing authentication token",
+                statusCode: 401
+            };
+        }
+
+        // First verify that the meeting exists and get meeting details
+        map<json> meetingFilter = {
+            "id": meetingId
+        };
+
+        record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
+        if meetingRecord is () {
+            return {
+                message: "Meeting not found",
+                statusCode: 404
+            };
+        }
+
+        // Convert to Meeting type
+        json meetingJson = meetingRecord.toJson();
+        Meeting meeting = check meetingJson.cloneWithType(Meeting);
+
+        // Check user's role and permission
+        boolean hasPermission = false;
+        string userRole = "";
+
+        // Check if user is creator
+        if meeting.createdBy == username {
+            hasPermission = true;
+            userRole = "creator";
+        } 
+        // Check if user is host (for round robin meetings)
+        else if meeting?.hosts is MeetingParticipant[] {
+            foreach MeetingParticipant host in meeting?.hosts ?: [] {
+                if host.username == username {
+                    hasPermission = true;
+                    userRole = "host";
+                    break;
+                }
+            }
+        }
+        // Check if user is participant
+        else if meeting?.participants is MeetingParticipant[] {
+            foreach MeetingParticipant participant in meeting?.participants ?: [] {
+                if participant.username == username {
+                    hasPermission = true;
+                    userRole = "participant";
+                    break;
+                }
+            }
+        }
+
+        if !hasPermission {
+            return {
+                message: "Unauthorized: You must be a creator, host, or participant to submit content",
+                statusCode: 403
+            };
+        }
+
+        // Parse the request payload
+        json|http:ClientError jsonPayload = req.getJsonPayload();
+        if jsonPayload is http:ClientError {
+            return {
+                message: "Invalid request payload: " + jsonPayload.message(),
+                statusCode: 400
+            };
+        }
+
+        SaveContentRequest payload = check jsonPayload.cloneWithType(SaveContentRequest);
+
+        // Create new MeetingContent record
+        MeetingContent newContent = {
+            id: uuid:createType1AsString(),
+            meetingId: meetingId,
+            uploaderId: username,
+            username: username,
+            content: payload.content,
+            createdAt: time:utcToString(time:utcNow())
+        };
+
+        // Insert into MongoDB
+        _ = check mongodb:contentCollection->insertOne(newContent);
+
+        // Log the content submission
+        log:printInfo(string `Content submitted by ${username} (${userRole}) for meeting ${meetingId}`);
+
+        return newContent;
+    }
+
+    resource function get meetings/[string meetingId]/content(http:Request req) returns MeetingContent[]|ErrorResponse|error {
+        // Extract username from cookie
+        string? username = check self.validateAndGetUsernameFromCookie(req);
+        if username is () {
+            return {
+                message: "Unauthorized: Invalid or missing authentication token",
+                statusCode: 401
+            };
+        }
+
+        // First verify that the meeting exists and get meeting details
+        map<json> meetingFilter = {
+            "id": meetingId
+        };
+
+        record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
+        if meetingRecord is () {
+            return {
+                message: "Meeting not found",
+                statusCode: 404
+            };
+        }
+
+        // Convert to Meeting type
+        json meetingJson = meetingRecord.toJson();
+        Meeting meeting = check meetingJson.cloneWithType(Meeting);
+
+        // Check user's role and permission
+        boolean hasPermission = false;
+
+        // Check if user is creator
+        if meeting.createdBy == username {
+            hasPermission = true;
+        } 
+        // Check if user is host (for round robin meetings)
+        else if meeting?.hosts is MeetingParticipant[] {
+            foreach MeetingParticipant host in meeting?.hosts ?: [] {
+                if host.username == username {
+                    hasPermission = true;
+                    break;
+                }
+            }
+        }
+        // Check if user is participant
+        else if meeting?.participants is MeetingParticipant[] {
+            foreach MeetingParticipant participant in meeting?.participants ?: [] {
+                if participant.username == username {
+                    hasPermission = true;
+                    break;
+                }
+            }
+        }
+
+        if !hasPermission {
+            return {
+                message: "Unauthorized: You must be a creator, host, or participant to view content",
+                statusCode: 403
+            };
+        }
+
+        // Get all content for this meeting
+        map<json> contentFilter = {
+            "meetingId": meetingId
+        };
+
+        stream<record {}, error?> contentCursor = check mongodb:contentCollection->find(contentFilter);
+        MeetingContent[] contents = [];
+
+        // Process the results
+        check from record {} contentData in contentCursor
+            do {
+                json contentJson = contentData.toJson();
+                MeetingContent content = check contentJson.cloneWithType(MeetingContent);
+                contents.push(content);
+            };
+
+        return contents;
     }
     
     resource function get meeting/[string meetingId]/availabilities(http:Request req) returns ParticipantAvailability[]|http:Response|error {
@@ -4100,7 +4064,47 @@ service /api on new http:Listener(8080) {
     response.setJsonPayload({"message": "User signed up successfully"});
     check caller->respond(response);
 }
-    
+    // Add to service.bal inside the service definition
+    resource function get auth/status(http:Request req) returns LoginResponse|ErrorResponse|error {
+        // Extract username from cookie
+        string? username = check self.validateAndGetUsernameFromCookie(req);
+        if username is () {
+            return {
+                message: "User not authenticated",
+                statusCode: 401
+            };
+        }
+
+        // Get user details from database
+        map<json> filter = {
+            "username": username
+        };
+
+        record {}|() userRecord = check mongodb:userCollection->findOne(filter);
+        if userRecord is () {
+            return {
+                message: "User not found",
+                statusCode: 404
+            };
+        }
+
+        // Convert to User type
+        json userJson = userRecord.toJson();
+        User user = check userJson.cloneWithType(User);
+
+        // Create login response without sensitive data
+        LoginResponse response = {
+            username: user.username,
+            name: user.name,
+            isadmin: user.isadmin,
+            role: user.role,
+            success: true,
+            calendar_connected: user.calendar_connected
+        };
+
+        return response;
+    }
+
     resource function post auth/login(http:Caller caller, http:Request req) returns error? {
     // Parse the JSON payload from the request body
     json loginPayload = check req.getJsonPayload();

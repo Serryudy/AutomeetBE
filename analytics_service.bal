@@ -4,33 +4,9 @@ import ballerina/uuid;
 import mongodb_atlas_app.mongodb;
 import ballerina/time;
 import ballerina/jwt;
+import ballerina/random;
 
-// Updated Transcript record to store meeting transcripts with questions and answers
-type Transcript record {
-    string id;
-    string meetingId;
-    QuestionAnswer[] questionAnswers;
-    string createdAt;
-    string updatedAt;
-};
 
-// New QuestionAnswer record to store both questions and answers
-type QuestionAnswer record {
-    string question;
-    string answer;
-};
-
-// Updated Request payload for creating a transcript
-type TranscriptRequest record {
-    string meetingId;
-    QuestionAnswer[] questionAnswers;
-};
-
-// Error response
-type ErrorResponse record {
-    string message;
-    int statusCode;
-};
 
 @http:ServiceConfig {
     cors: {
@@ -599,6 +575,171 @@ service /api on new http:Listener(8081) {
         };
     }
 
+    // Analytics endpoint
+    resource function get meetings/[string meetingId]/analytics(http:Request req) returns MeetingAnalytics|ErrorResponse|error {
+        // Extract username from cookie
+        string? username = check self.validateAndGetUsernameFromCookie(req);
+        if username is () {
+            return {
+                message: "Unauthorized: Invalid or missing authentication token",
+                statusCode: 401
+            };
+        }
+
+        // Verify meeting exists and user has access
+        map<json> meetingFilter = {
+            "id": meetingId
+        };
+
+        record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
+        if meetingRecord is () {
+            return {
+                message: "Meeting not found",
+                statusCode: 404
+            };
+        }
+
+        json meetingJson = meetingRecord.toJson();
+        Meeting meeting = check meetingJson.cloneWithType(Meeting);
+
+        // Check user's permission
+        boolean hasAccess = self.checkUserMeetingAccess(username, meeting);
+        if !hasAccess {
+            return {
+                message: "You don't have access to this meeting's analytics",
+                statusCode: 403
+            };
+        }
+
+        // Generate or retrieve analytics
+        MeetingAnalytics analytics = check self.generateMeetingAnalytics(meeting);
+        return analytics;
+    }
+
+    // Helper function to generate meeting analytics
+    function generateMeetingAnalytics(Meeting meeting) returns MeetingAnalytics|error {
+        string[] daysOfWeek = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+        
+        // Get rescheduling frequency
+        DayFrequency[] reschedulingFreq = check self.calculateReschedulingFrequency(meeting.title);
+        
+        // Generate scheduling accuracy with random values
+        AccuracyMetric[] schedulingAccuracy = [];
+        foreach string day in daysOfWeek {
+            float randomAccuracy = random:createDecimal() * 0.5 + 0.5; // Random value between 0.5 and 1.0
+            schedulingAccuracy.push({
+                day: day,
+                accuracy: self.roundTo2Decimals(randomAccuracy)
+            });
+        }
+        
+        // Generate random engagement metrics
+        EngagementMetrics engagement = {
+            speakingTime: self.roundTo2Decimals(random:createDecimal() * 100),
+            participantEngagement: self.roundTo2Decimals(random:createDecimal() * 100),
+            chatEngagement: self.roundTo2Decimals(random:createDecimal() * 100)
+        };
+        
+        string currentTime = time:utcToString(time:utcNow());
+        
+        return {
+            meetingId: meeting.id,
+            reschedulingFrequency: reschedulingFreq,
+            schedulingAccuracy: schedulingAccuracy,
+            engagement: engagement,
+            createdAt: currentTime,
+            updatedAt: currentTime
+        };
+    }
+
+    // Helper function to calculate rescheduling frequency
+    function calculateReschedulingFrequency(string meetingTitle) returns DayFrequency[]|error {
+        string[] daysOfWeek = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+        
+        // Find all meetings with the same title
+        map<json> filter = {
+            "title": meetingTitle
+        };
+        
+        stream<record {}, error?> meetingCursor = check mongodb:meetingCollection->find(filter);
+        map<int> dayFrequencyMap = {};
+        
+        // Process meetings
+        int meetingCount = 0;
+        check from record {} meetingData in meetingCursor
+            do {
+                meetingCount += 1;
+                json meetingJson = meetingData.toJson();
+                Meeting meeting = check meetingJson.cloneWithType(Meeting);
+                
+                // Extract day of week from meeting's directTimeSlot
+                if meeting?.directTimeSlot is TimeSlot {
+                    TimeSlot timeSlot = <TimeSlot>meeting?.directTimeSlot;
+                    time:Civil|error dateTime = time:civilFromString(timeSlot.startTime);
+                    if dateTime is time:Civil {
+                        time:DayOfWeek? dayOfWeek = dateTime.dayOfWeek; // 1 (Monday) to 7 (Sunday)
+                            if dayOfWeek is time:DayOfWeek {
+                                string day = daysOfWeek[dayOfWeek - 1]; // Adjust index as array starts from 0
+                        dayFrequencyMap[day] = (dayFrequencyMap[day] ?: 0) + 1;
+                    }
+                }
+            }
+            };
+    
+        DayFrequency[] frequencies = [];
+        
+        // If only one meeting found, return all zeros
+        if meetingCount <= 1 {
+            foreach string day in daysOfWeek {
+                frequencies.push({
+                    day: day,
+                    frequency: 0
+                });
+            }
+            return frequencies;
+        }
+        
+        // Generate frequencies for each day
+        foreach string day in daysOfWeek {
+            frequencies.push({
+                day: day,
+                frequency: dayFrequencyMap[day] ?: 0 // Use 0 for days without meetings
+            });
+        }
+        
+        return frequencies;
+    }
+
+    // Helper function to round numbers to 2 decimal places
+    function roundTo2Decimals(float number) returns float {
+        return <float>(<int>(number * 100.0)) / 100.0;
+    }
+
+    // Helper function to check user's access to meeting
+    function checkUserMeetingAccess(string username, Meeting meeting) returns boolean {
+        if meeting.createdBy == username {
+            return true;
+        }
+        
+        if meeting?.participants is MeetingParticipant[] {
+            foreach MeetingParticipant participant in meeting?.participants ?: [] {
+                if participant.username == username {
+                    return true;
+                }
+            }
+        }
+        
+        if meeting?.hosts is MeetingParticipant[] {
+            foreach MeetingParticipant host in meeting?.hosts ?: [] {
+                if host.username == username {
+                    return true;
+                }
+            }
+        }
+        
+        return false;
+    }
+
     resource function post transcripts/[string meetingId]/generatereport(http:Request req) returns json|http:Response|error {
         // Authentication (same as your other endpoints)
         string? username = check self.validateAndGetUsernameFromCookie(req);
@@ -707,7 +848,7 @@ service /api on new http:Listener(8081) {
         http:Client reportClient = check new("http://localhost:8082");  // Update URL if deployed elsewhere
         
         // Call the report generator API
-        http:Response|error reportResponse = check reportClient->post("/api/generate-report", reportRequest);
+        http:Response|error reportResponse = reportClient->post("/api/generate-report", reportRequest);
         
         if reportResponse is error {
             http:Response response = new;
@@ -719,7 +860,17 @@ service /api on new http:Listener(8081) {
         }
         
         // Return the API response
-        return reportResponse;
+        json|http:ClientError responsePayload = reportResponse.getJsonPayload();
+        if responsePayload is http:ClientError {
+            http:Response response = new;
+            response.statusCode = 500;
+            response.setJsonPayload({
+                message: "Failed to parse report response"
+            });
+            return response;
+        }
+        
+        return responsePayload;
     }
     
     // Helper function to validate JWT token from cookie
@@ -737,9 +888,9 @@ service /api on new http:Listener(8081) {
         
         // If no auth cookie found, check for Authorization header as fallback
         if token is () {
-            string authHeader = check request.getHeader("Authorization");
+            string|http:HeaderNotFoundError authHeader = request.getHeader("Authorization");
             
-            if authHeader.startsWith("Bearer ") {
+            if authHeader is string && authHeader.startsWith("Bearer ") {
                 token = authHeader.substring(7);
             } else {
                 log:printError("No authentication token found in cookies or headers");
@@ -748,7 +899,7 @@ service /api on new http:Listener(8081) {
         }
         
         // Use the same JWT_SECRET as in the main service
-        final string & readonly JWT_SECRET = "6be1b0ba9fd7c089e3f8ce1bdfcd97613bbe986cf45c1eaec198108bad119bcbfe2088b317efb7d30bae8e60f19311ff13b8990bae0c80b4cb5333c26abcd27190d82b3cd999c9937647708857996bb8b836ee4ff65a31427d1d2c5c59ec67cb7ec94ae34007affc2722e39e7aaca590219ce19cec690ffb7846ed8787296fd679a5a2eadb7d638dc656917f837083a9c0b50deda759d453b8c9a7a4bb41ae077d169de468ec225f7ba21d04219878cd79c9329ea8c29ce8531796a9cc01dd200bb683f98585b0f98cffbf67cf8bafabb8a2803d43d67537298e4bf78c1a05a76342a44b2cf7cf3ae52b78469681b47686352122f8f1af2427985ec72783c06e";
+        final string & readonly JWT_SECRET = "dummy";
         
         // Validate the JWT token
         jwt:ValidatorConfig validatorConfig = {
@@ -791,5 +942,127 @@ service /api on new http:Listener(8081) {
         
         log:printError("Username not found in JWT token");
         return ();
+    }
+
+    resource function get users/analytics(http:Request req) returns UserAnalytics|ErrorResponse|error {
+        // Extract username from cookie
+        string? username = check self.validateAndGetUsernameFromCookie(req);
+        if username is () {
+            return {
+                message: "Unauthorized: Invalid or missing authentication token",
+                statusCode: 401
+            };
+        }
+
+        // Generate analytics components
+        AvailabilityStats availStats = check self.calculateUserAvailability(username);
+        ParticipationStats partStats = self.calculateUserParticipation();
+        MeetingFrequency[] meetingFreq = check self.calculateUserMeetingFrequency(username);
+
+        // Create the analytics response
+        UserAnalytics analytics = {
+            username: username,
+            availability: availStats,
+            participation: partStats,
+            meetingFrequency: meetingFreq,
+            generatedAt: time:utcToString(time:utcNow())
+        };
+
+        return analytics;
+    }
+
+    // Helper function to calculate user availability statistics
+    function calculateUserAvailability(string username) returns AvailabilityStats|error {
+        // Get user's availability records
+        map<json> filter = {
+            "username": username
+        };
+
+        stream<record {}, error?> availCursor = check mongodb:availabilityCollection->find(filter);
+        int availableCount = 0;
+        int totalSlots = 0;
+
+        // Process availability records
+        check from record {} availData in availCursor
+            do {
+                json availJson = availData.toJson();
+                Availability avail = check availJson.cloneWithType(Availability);
+                
+                // Count total slots and available slots
+                totalSlots += avail.timeSlots.length();
+                availableCount += avail.timeSlots.length();
+            };
+
+        // Calculate percentages
+        float available = totalSlots > 0 ? (availableCount * 60.0) / totalSlots : 60.0;
+        float unavailable = 30.0; // Fixed value as per requirement
+        float tendency = 10.0; // Fixed value as per requirement
+
+        return {
+            available: self.roundTo2Decimals(available),
+            unavailable: self.roundTo2Decimals(unavailable),
+            tendency: self.roundTo2Decimals(tendency)
+        };
+    }
+
+    // Helper function to generate random participation stats
+    function calculateUserParticipation() returns ParticipationStats {
+        float randomParticipation = random:createDecimal() * 100;
+        return {
+            participationRate: self.roundTo2Decimals(randomParticipation)
+        };
+    }
+
+    // Helper function to calculate user's meeting frequency
+    function calculateUserMeetingFrequency(string username) returns MeetingFrequency[]|error {
+        string[] daysOfWeek = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+        map<int> dayCountMap = {};
+
+        // Initialize counts for all days
+        foreach string day in daysOfWeek {
+            dayCountMap[day] = 0;
+        }
+
+        // Find meetings where user is creator, participant, or host
+        map<json> filter = {
+            "$or": [
+                {"createdBy": username},
+                {"participants.username": username},
+                {"hosts.username": username}
+            ]
+        };
+
+        stream<record {}, error?> meetingCursor = check mongodb:meetingCollection->find(filter);
+
+        // Process meetings
+        check from record {} meetingData in meetingCursor
+            do {
+                json meetingJson = meetingData.toJson();
+                Meeting meeting = check meetingJson.cloneWithType(Meeting);
+                
+                // Extract day of week from meeting's time slot
+                if meeting?.directTimeSlot is TimeSlot {
+                    TimeSlot timeSlot = <TimeSlot>meeting?.directTimeSlot;
+                    time:Civil|error dateTime = time:civilFromString(timeSlot.startTime);
+                    if dateTime is time:Civil {
+                        time:DayOfWeek? dayOfWeekOpt = dateTime.dayOfWeek;
+                        if dayOfWeekOpt is time:DayOfWeek {
+                            string day = daysOfWeek[dayOfWeekOpt - 1];
+                        dayCountMap[day] = (dayCountMap[day] ?: 0) + 1;
+                    }
+                }
+            }
+            };
+
+        // Convert map to array of MeetingFrequency
+        MeetingFrequency[] frequencies = [];
+        foreach string day in daysOfWeek {
+            frequencies.push({
+                day: day,
+                count: dayCountMap[day] ?: 0
+            });
+        }
+
+        return frequencies;
     }
 }
