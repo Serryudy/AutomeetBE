@@ -12,7 +12,7 @@ import mongodb_atlas_app.mongodb;
     }
 }
 
-service /api on new http:Listener(8082) {
+service /api/community on ln {
     resource function post groups(http:Request req) returns Group|ErrorResponse|error {
         // Extract username from cookie
         string? username = check validateAndGetUsernameFromCookie(req);
