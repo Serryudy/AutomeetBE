@@ -85,7 +85,7 @@ service /api on new http:Listener(8080) {
             isAdmin: true
         };
         
-        // Insert the meeting into MongoDB
+        // Insert the meeting into MongoDB//
         _ = check mongodb:meetingCollection->insertOne(meeting);
         _ = check mongodb:meetinguserCollection->insertOne(meetingAssignment);
         
