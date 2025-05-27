@@ -15,9 +15,9 @@ import mongodb_atlas_app.mongodb;
     }
 }
 
-service /api on new http:Listener(8083) {
+service /api/auth on ln {
 
-    resource function post auth/signup(http:Caller caller, http:Request req) returns error? {
+    resource function post signup(http:Caller caller, http:Request req) returns error? {
         // Parse the JSON payload from the request body
         json signupPayload = check req.getJsonPayload();
         
@@ -123,7 +123,7 @@ service /api on new http:Listener(8083) {
         check caller->respond(response);
     }
     // Add to service.bal inside the service definition
-    resource function get auth/status(http:Request req) returns LoginResponse|ErrorResponse|error {
+    resource function get status(http:Request req) returns LoginResponse|ErrorResponse|error {
         // Extract username from cookie
         string? username = check validateAndGetUsernameFromCookie(req);
         if username is () {
@@ -163,7 +163,7 @@ service /api on new http:Listener(8083) {
         return response;
     }
 
-    resource function post auth/login(http:Caller caller, http:Request req) returns error? {
+    resource function post login(http:Caller caller, http:Request req) returns error? {
         // Parse the JSON payload from the request body
         json loginPayload = check req.getJsonPayload();
         
@@ -240,7 +240,7 @@ service /api on new http:Listener(8083) {
 
             // Set the refresh token in a separate cookie with longer expiration
             http:Cookie refreshCookie = new("refresh_token", refreshToken, 
-                path = "/api/auth/refresh", // Restrict to refresh endpoint only
+                path = "/api/refresh", // Restrict to refresh endpoint only
                 httpOnly = true, 
                 secure = true,
                 maxAge = 2592000 // 30 days
@@ -251,7 +251,7 @@ service /api on new http:Listener(8083) {
             check caller->respond(response);
     }
 
-    resource function post auth/refresh(http:Caller caller, http:Request req) returns error? {
+    resource function post refresh(http:Caller caller, http:Request req) returns error? {
         // Get the refresh token from the cookie
         string? refreshToken = ();
         http:Cookie[] cookies = req.getCookies();
@@ -349,7 +349,7 @@ service /api on new http:Listener(8083) {
         
         // Set the new refresh token in a separate cookie with longer expiration
         http:Cookie refreshCookie = new("refresh_token", newRefreshToken, 
-            path = "/api/auth/refresh", // Restrict to refresh endpoint only
+            path = "/api/refresh", // Restrict to refresh endpoint only
             httpOnly = true, 
             secure = true,
             maxAge = 2592000 // 30 days
@@ -371,7 +371,7 @@ service /api on new http:Listener(8083) {
 
     
     // Updated Google login endpoint
-    resource function post auth/googleLogin(http:Caller caller, http:Request req) returns error? {
+    resource function post googleLogin(http:Caller caller, http:Request req) returns error? {
         // Parse the JSON payload from the request body
         json googleLoginPayload = check req.getJsonPayload();
         
@@ -445,10 +445,10 @@ service /api on new http:Listener(8083) {
     }
     
     // Updated Google OAuth flow to include calendar permissions
-    resource function get auth/google() returns http:Response|error {
+    resource function get google() returns http:Response|error {
         // Include calendar-related scopes in the permission request
         string encodedRedirectUri = check url:encode(googleRedirectUri, "UTF-8");
-        string authUrl = string `https://accounts.google.com/o/oauth2/v2/auth?client_id=${googleClientId}&response_type=code&scope=email%20profile%20https://www.googleapis.com/auth/calendar&redirect_uri=${encodedRedirectUri}&access_type=offline&prompt=consent`;
+        string authUrl = string `https://accounts.google.com/o/oauth2/v2/auth?client_id=${googleClientId}&response_type=code&scope=email%20profile%20https://www.googleapis.com/calendar&redirect_uri=${encodedRedirectUri}&access_type=offline&prompt=consent`;
         
         // Create a redirect response
         http:Response response = new;
@@ -458,7 +458,7 @@ service /api on new http:Listener(8083) {
     }
     
     // Updated Google OAuth callback to handle calendar integration
-    resource function get auth/google/callback(http:Caller caller, http:Request req) returns error? {
+    resource function get google/callback(http:Caller caller, http:Request req) returns error? {
         // Extract the authorization code from the query parameters
         string? code = req.getQueryParamValue("code");
         
@@ -596,7 +596,7 @@ service /api on new http:Listener(8083) {
     }
     
     // New endpoint to connect Google Calendar separately
-    resource function get auth/connectCalendar(http:Caller caller, http:Request req) returns error? {
+    resource function get connectCalendar(http:Caller caller, http:Request req) returns error? {
         // First, verify user is authenticated by checking JWT in cookie
         string authToken = "";
         http:Cookie[] cookies = req.getCookies();
@@ -643,7 +643,7 @@ service /api on new http:Listener(8083) {
                 
         // Include calendar-specific scopes and use the calendar redirect URI
         string encodedRedirectUri = check url:encode(googleCalendarRedirectUri, "UTF-8");
-        string authUrl = string `https://accounts.google.com/o/oauth2/v2/auth?client_id=${googleClientId}&response_type=code&scope=https://www.googleapis.com/auth/calendar&redirect_uri=${encodedRedirectUri}&access_type=offline&prompt=consent&state=${username}`;
+        string authUrl = string `https://accounts.google.com/o/oauth2/v2/auth?client_id=${googleClientId}&response_type=code&scope=https://www.googleapis.com/calendar&redirect_uri=${encodedRedirectUri}&access_type=offline&prompt=consent&state=${username}`;
         
         // Create a redirect response to Google's OAuth page
         http:Response response = new;
@@ -653,7 +653,7 @@ service /api on new http:Listener(8083) {
     }
     
     // Callback endpoint specifically for calendar connection
-    resource function get auth/google/calendar/callback(http:Caller caller, http:Request req) returns error? {
+    resource function get google/calendar/callback(http:Caller caller, http:Request req) returns error? {
         // Extract authorization code and state (username) from query parameters
         string? code = req.getQueryParamValue("code");
         string? username = req.getQueryParamValue("state");
@@ -750,7 +750,7 @@ service /api on new http:Listener(8083) {
     }
     
     // Add endpoint to check calendar connection status
-    resource function get auth/calendarStatus(http:Caller caller, http:Request req) returns error? {
+    resource function get calendarStatus(http:Caller caller, http:Request req) returns error? {
         // First, verify user is authenticated by checking JWT in cookie
         string authToken = "";
         http:Cookie[] cookies = req.getCookies();
@@ -822,7 +822,7 @@ service /api on new http:Listener(8083) {
     }
     
     // Add a logout endpoint to clear the cookie
-    resource function get auth/logout(http:Caller caller) returns error? {
+    resource function get logout(http:Caller caller) returns error? {
         http:Response response = new;
         
         // Log the logout attempt
@@ -848,7 +848,7 @@ service /api on new http:Listener(8083) {
     }
 
     // Add this new endpoint to retrieve Gmail addresses with connected calendars
-    resource function get auth/connectedCalendarAccounts(http:Caller caller, http:Request req) returns error? {
+    resource function get connectedCalendarAccounts(http:Caller caller, http:Request req) returns error? {
         // First, verify the requesting user is authenticated and admin
         string authToken = "";
         http:Cookie[] cookies = req.getCookies();
@@ -944,7 +944,7 @@ service /api on new http:Listener(8083) {
     }
 
     // Disconnect calendar endpoint
-    resource function post auth/disconnectCalendar(http:Caller caller, http:Request req) returns error? {
+    resource function post disconnectCalendar(http:Caller caller, http:Request req) returns error? {
         // First, verify user is authenticated by checking JWT in cookie
         string authToken = "";
         http:Cookie[] cookies = req.getCookies();
