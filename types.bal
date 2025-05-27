@@ -288,3 +288,12 @@ public type UserAnalytics record {
     MeetingFrequency[] meetingFrequency;
     string generatedAt;
 };
+
+public type Note record {
+    string id;
+    string username;
+    string meetingId;
+    string noteContent;
+    string createdAt;
+    string updatedAt;
+};

@@ -2558,4 +2558,226 @@ service /api on new http:Listener(8080) {
 
         return updatedMeeting;
     }
+
+    // create notes related to a meeting
+    resource function post meetings/[string meetingId]/notes(http:Request req) returns Note|ErrorResponse|error {
+        // Extract username from cookie
+        string? username = check validateAndGetUsernameFromCookie(req);
+        if username is () {
+            return {
+                message: "Unauthorized: Invalid or missing authentication token",
+                statusCode: 401
+            };
+        }
+
+        // Verify meeting exists and user has access
+        map<json> meetingFilter = {
+            "id": meetingId
+        };
+
+        record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
+        if meetingRecord is () {
+            return {
+                message: "Meeting not found",
+                statusCode: 404
+            };
+        }
+
+        // Convert to Meeting type
+        json meetingJson = meetingRecord.toJson();
+        Meeting meeting = check meetingJson.cloneWithType(Meeting);
+
+        // Check user's permission
+        boolean hasPermission = false;
+
+        // Check if user is creator
+        if meeting.createdBy == username {
+            hasPermission = true;
+        } 
+        // Check if user is host
+        else if meeting?.hosts is MeetingParticipant[] {
+            foreach MeetingParticipant host in meeting?.hosts ?: [] {
+                if host.username == username {
+                    hasPermission = true;
+                    break;
+                }
+            }
+        }
+        // Check if user is participant
+        else if meeting?.participants is MeetingParticipant[] {
+            foreach MeetingParticipant participant in meeting?.participants ?: [] {
+                if participant.username == username {
+                    hasPermission = true;
+                    break;
+                }
+            }
+        }
+
+        if !hasPermission {
+            return {
+                message: "Unauthorized: You must be a creator, host, or participant to create notes",
+                statusCode: 403
+            };
+        }
+
+        // Parse request payload
+        json|http:ClientError jsonPayload = req.getJsonPayload();
+        if jsonPayload is http:ClientError {
+            return {
+                message: "Invalid request payload",
+                statusCode: 400
+            };
+        }
+
+        // Validate note content
+        map<json> payload = <map<json>>jsonPayload;
+        if !payload.hasKey("noteContent") || payload.noteContent == "" {
+            return {
+                message: "Note content is required",
+                statusCode: 400
+            };
+        }
+
+        string currentTime = time:utcToString(time:utcNow());
+
+        // Create note record
+        Note note = {
+            id: uuid:createType1AsString(),
+            username: username,
+            meetingId: meetingId,
+            noteContent: check payload.noteContent.ensureType(),
+            createdAt: currentTime,
+            updatedAt: currentTime
+        };
+
+        // Insert into MongoDB
+        _ = check mongodb:noteCollection->insertOne(note);
+
+        return note;
+    }
+
+    // get notes related to a meeting and logged in user
+    resource function get meetings/[string meetingId]/notes(http:Request req) returns Note[]|ErrorResponse|error {
+        // Extract username from cookie
+        string? username = check validateAndGetUsernameFromCookie(req);
+        if username is () {
+            return {
+                message: "Unauthorized: Invalid or missing authentication token",
+                statusCode: 401
+            };
+        }
+
+        // Verify meeting exists and user has access
+        map<json> meetingFilter = {
+            "id": meetingId
+        };
+
+        record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
+        if meetingRecord is () {
+            return {
+                message: "Meeting not found",
+                statusCode: 404
+            };
+        }
+
+        // Convert to Meeting type
+        json meetingJson = meetingRecord.toJson();
+        Meeting meeting = check meetingJson.cloneWithType(Meeting);
+
+        // Check user's permission
+        boolean hasPermission = false;
+
+        // Check if user is creator
+        if meeting.createdBy == username {
+            hasPermission = true;
+        } 
+        // Check if user is host
+        else if meeting?.hosts is MeetingParticipant[] {
+            foreach MeetingParticipant host in meeting?.hosts ?: [] {
+                if host.username == username {
+                    hasPermission = true;
+                    break;
+                }
+            }
+        }
+        // Check if user is participant
+        else if meeting?.participants is MeetingParticipant[] {
+            foreach MeetingParticipant participant in meeting?.participants ?: [] {
+                if participant.username == username {
+                    hasPermission = true;
+                    break;
+                }
+            }
+        }
+
+        if !hasPermission {
+            return {
+                message: "Unauthorized: You must be a creator, host, or participant to view notes",
+                statusCode: 403
+            };
+        }
+
+        // Get all notes for this meeting
+        map<json> noteFilter = {
+            "meetingId": meetingId
+        };
+
+        stream<record {}, error?> noteCursor = check mongodb:noteCollection->find(noteFilter);
+        Note[] notes = [];
+
+        // Process the results
+        check from record {} noteData in noteCursor
+            do {
+                json noteJson = noteData.toJson();
+                Note note = check noteJson.cloneWithType(Note);
+                notes.push(note);
+            };
+
+        return notes;
+    }
+
+    // Add to MeetingService.bal in the service
+    resource function delete meetings/notes/[string noteId](http:Request req) returns json|http:Response|error {
+        // Extract username from cookie
+        string? username = check validateAndGetUsernameFromCookie(req);
+        if username is () {
+            return {
+                message: "Unauthorized: Invalid or missing authentication token",
+                statusCode: 401
+            };
+        }
+
+        // Get the note to verify it exists and check ownership
+        map<json> noteFilter = {
+            "id": noteId
+        };
+
+        record {}|() noteRecord = check mongodb:noteCollection->findOne(noteFilter);
+        if noteRecord is () {
+            return {
+                message: "Note not found",
+                statusCode: 404
+            };
+        }
+
+        // Convert to Note type
+        json noteJson = noteRecord.toJson();
+        Note note = check noteJson.cloneWithType(Note);
+
+        // Verify ownership - only the creator of the note can delete it
+        if note.username != username {
+            return {
+                message: "Unauthorized: You can only delete your own notes",
+                statusCode: 403
+            };
+        }
+
+        // Delete the note
+        _ = check mongodb:noteCollection->deleteOne(noteFilter);
+
+        return {
+            "message": "Note deleted successfully",
+            "noteId": noteId
+        };
+    }
 }
