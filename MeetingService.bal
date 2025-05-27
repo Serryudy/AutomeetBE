@@ -32,7 +32,9 @@ function hashPassword(string password) returns string {
     }
 }
 
-service /api on new http:Listener(8080) {
+
+
+service /api on ln {
     
     // Updated endpoint to create a new meeting with cookie authentication
     resource function post direct/meetings(http:Request req) returns Meeting|ErrorResponse|error {
@@ -560,7 +562,7 @@ service /api on new http:Listener(8080) {
         return payload;
     }
     
-    // Updated endpoint to get availability with cookie authentication
+    // endpoint to get availability with cookie authentication
     resource function get availability/[string meetingId](http:Request req) returns Availability[]|ErrorResponse|error {
         // Extract username from cookie
         string? username = check validateAndGetUsernameFromCookie(req);
