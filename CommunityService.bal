@@ -241,4 +241,118 @@ service /api/community on ln {
         
         return contacts;
     }
+
+resource function delete contacts/[string clientId](http:Request req) returns http:Response|error {
+    // Extract username from cookie for authorization
+    string? username = check validateAndGetUsernameFromCookie(req);
+    if username is () {
+        http:Response response = new;
+        response.statusCode = 401;
+        response.setJsonPayload({
+            "message": "Unauthorized - Please login again",
+            "statusCode": 401
+        });
+        return response;
+    }
+
+    // Create filter for finding and deleting the contact
+    map<json> filter = {
+        "id": clientId,
+        "createdBy": username
+    };
+
+    // Try to find the contact first
+    record {}|() existingContact = check mongodb:contactCollection->findOne(filter);
+    if existingContact is () {
+        http:Response response = new;
+        response.statusCode = 404;
+        response.setJsonPayload({
+            "message": "Contact not found",
+            "statusCode": 404
+        });
+        return response;
+    }
+
+    // Delete the contact
+    var deleteResult = check mongodb:contactCollection->deleteOne(filter);
+
+    // Check if deletion was successful
+    if deleteResult.deletedCount == 0 {
+        http:Response response = new;
+        response.statusCode = 500;
+        response.setJsonPayload({
+            "message": "Failed to delete contact",
+            "statusCode": 500
+        });
+        return response;
+    }
+
+    // Return success response
+    http:Response response = new;
+    response.statusCode = 200;
+    response.setJsonPayload({
+        "message": "Contact deleted successfully",
+        "statusCode": 200
+    });
+    return response;
+}
+
+resource function put contacts/[string contactId](http:Request req) returns Contact|ErrorResponse|error {
+    // Extract username from cookie for authorization
+    string? username = check validateAndGetUsernameFromCookie(req);
+    if username is () {
+        return {
+            message: "Unauthorized: Invalid or missing authentication token",
+            statusCode: 401
+        };
+    }
+
+    // Parse the request payload
+    json|http:ClientError jsonPayload = req.getJsonPayload();
+    if jsonPayload is http:ClientError {
+        return {
+            message: "Invalid request payload: " + jsonPayload.message(),
+            statusCode: 400
+        };
+    }
+
+    // Create filter to find the existing contact
+    map<json> filter = {
+        "id": contactId,
+        "createdBy": username
+    };
+
+    // Check if contact exists and belongs to user
+    record {}|() existingContact = check mongodb:contactCollection->findOne(filter);
+    if existingContact is () {
+        return {
+            message: "Contact not found or unauthorized to edit",
+            statusCode: 404
+        };
+    }
+
+    // Convert payload to map<json> and add required fields
+    map<json> updateData = <map<json>>jsonPayload;
+    updateData["id"] = contactId;
+    updateData["createdBy"] = username;
+
+    // Convert to Contact type
+    Contact payload = check updateData.cloneWithType(Contact);
+
+    // Update the contact in MongoDB
+    mongodb:Update updateDoc = {
+        "set": {
+            "username": payload.username,
+            "email": payload.email,
+            "phone": payload.phone,
+            "profileimg": payload.profileimg,
+            "id": contactId,
+            "createdBy": username
+        }
+    };
+
+    _ = check mongodb:contactCollection->updateOne(filter, updateDoc);
+
+    return payload;
+}
 }
