@@ -66,7 +66,7 @@ configurable string jwtAudience = "automeet-app";
 configurable string jwtSigningKey = "dummy"; // Should be securely stored
 
 // Create the WebSocket listener
-listener websocket:Listener chatListener = new(9091);
+listener websocket:Listener chatListener = new(9090);
 
 // WebSocket service with authentication
 service /ws/chat on chatListener {
@@ -729,8 +729,7 @@ type ChatRoomResponse record {|
     string? roomName;
 |};
 
-// Create the HTTP listener for the chat API
-listener http:Listener chatHttpListener = new(9092);
+
 
 // HTTP service for chat resources
 @http:ServiceConfig {
@@ -741,7 +740,7 @@ listener http:Listener chatHttpListener = new(9092);
         exposeHeaders: ["X-Custom-Header"]
     }
 }
-service /api/chat on chatHttpListener {
+service /api/chat on ln {
 
     resource function get rooms(@http:Header {name: "Cookie"} string? cookieHeader) returns ApiResponse|error {
         // Extract and validate the token
