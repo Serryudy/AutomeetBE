@@ -30,7 +30,9 @@ public mongodb:Collection temporarySuggestionsCollection = getCollectionRef("tem
 public mongodb:Collection chatroomCollection = getCollectionRef("chatrooms");
 public mongodb:Collection messageCollection = getCollectionRef("messages");
 public mongodb:Collection transcriptCollection = getCollectionRef("transcripts");
-
+public mongodb:Collection contentCollection = getCollectionRef("content");
+public mongodb:Collection analyticsCollection = getCollectionRef("analytics");
+public mongodb:Collection noteCollection = getCollectionRef("notes");
 // Initialize MongoDB client - handles the error internally
 function initMongoDbClient() returns mongodb:Client {
     mongodb:Client|error dbclient = new ({
