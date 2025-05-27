@@ -13,7 +13,7 @@ import mongodb_atlas_app.mongodb;
     }
 }
 
-service /api on new http:Listener(8080) {
+service /api on new http:Listener(8084) {
     resource function put users/edit(http:Request req) returns User|ErrorResponse|error {
         // Extract username from cookie
         string? username = check self.validateAndGetUsernameFromCookie(req);
