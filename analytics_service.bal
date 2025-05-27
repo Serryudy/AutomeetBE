@@ -17,7 +17,7 @@ import ballerina/random;
         maxAge: 84900
     }
 }
-service /api on new http:Listener(8081) {
+service /api/analytics on ln {
     
     // Create a new transcript - Explicitly specify ErrorResponse as the error type
     resource function post transcripts(http:Request req) returns Transcript|http:Response|error {
