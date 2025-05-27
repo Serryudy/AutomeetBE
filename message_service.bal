@@ -60,10 +60,10 @@ map<websocket:Caller> connections = {};
 map<string[]> userRooms = {}; // Map of connectionId -> array of roomIds
 map<string> connectionUsers = {}; // Map of connectionId -> userId
 
-// JWT validation configurations
+//JWT validation configurations
 configurable string jwtIssuer = "automeet";
 configurable string jwtAudience = "automeet-app";
-configurable string jwtSigningKey = "6be1b0ba9fd7c089e3f8ce1bdfcd97613bbe986cf45c1eaec198108bad119bcbfe2088b317efb7d30bae8e60f19311ff13b8990bae0c80b4cb5333c26abcd27190d82b3cd999c9937647708857996bb8b836ee4ff65a31427d1d2c5c59ec67cb7ec94ae34007affc2722e39e7aaca590219ce19cec690ffb7846ed8787296fd679a5a2eadb7d638dc656917f837083a9c0b50deda759d453b8c9a7a4bb41ae077d169de468ec225f7ba21d04219878cd79c9329ea8c29ce8531796a9cc01dd200bb683f98585b0f98cffbf67cf8bafabb8a2803d43d67537298e4bf78c1a05a76342a44b2cf7cf3ae52b78469681b47686352122f8f1af2427985ec72783c06e"; // Should be securely stored
+configurable string jwtSigningKey = "dummy"; // Should be securely stored
 
 // Create the WebSocket listener
 listener websocket:Listener chatListener = new(9091);
