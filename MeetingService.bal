@@ -1,10 +1,10 @@
+import mongodb_atlas_app.mongodb;
+
+import ballerina/crypto;
 import ballerina/http;
 import ballerina/log;
 import ballerina/time;
 import ballerina/uuid;
-import ballerina/crypto;
-import mongodb_atlas_app.mongodb;
-
 
 // Google OAuth config - add your client values in production
 configurable string googleClientId = "q80a9la618pq41b7nnua3gigv29e0f46.apps.googleusercontent.com";
@@ -33,7 +33,7 @@ function hashPassword(string password) returns string {
 }
 
 service /api on new http:Listener(8080) {
-    
+
     // Updated endpoint to create a new meeting with cookie authentication
     resource function post direct/meetings(http:Request req) returns Meeting|ErrorResponse|error {
         // Extract username from cookie
@@ -44,7 +44,7 @@ service /api on new http:Listener(8080) {
                 statusCode: 401
             };
         }
-        
+
         // Parse the request payload
         json|http:ClientError jsonPayload = req.getJsonPayload();
         if jsonPayload is http:ClientError {
@@ -53,18 +53,18 @@ service /api on new http:Listener(8080) {
                 statusCode: 400
             };
         }
-        
+
         DirectMeetingRequest payload = check jsonPayload.cloneWithType(DirectMeetingRequest);
-        
+
         // Generate a unique meeting ID
         string meetingId = uuid:createType1AsString();
-        
+
         // Process participants
         MeetingParticipant[] participants = check processParticipants(
-            username, 
-            payload.participantIds
+                username,
+                payload.participantIds
         );
-        
+
         // Create the meeting record
         Meeting meeting = {
             id: meetingId,
@@ -84,28 +84,28 @@ service /api on new http:Listener(8080) {
             meetingId: meetingId,
             isAdmin: true
         };
-        
+
         //Insert the meeting into MongoDB
         _ = check mongodb:meetingCollection->insertOne(meeting);
         _ = check mongodb:meetinguserCollection->insertOne(meetingAssignment);
-        
+
         //Check if the meeting time is in the future
         TimeSlot _ = payload.directTimeSlot;
-        
+
         // Create and insert notification
         Notification notification = check createMeetingNotification(
-            meetingId, 
-            meeting.title, 
-            "direct", 
-            participants
+                meetingId,
+                meeting.title,
+                "direct",
+                participants
         );
-        
+
         // Add the creator to the notification recipients
         notification.toWhom.push(username);
-        
+
         // Insert the notification
         _ = check mongodb:notificationCollection->insertOne(notification);
-        
+
         return meeting;
     }
 
@@ -119,7 +119,7 @@ service /api on new http:Listener(8080) {
                 statusCode: 401
             };
         }
-        
+
         // Parse the request payload
         json|http:ClientError jsonPayload = req.getJsonPayload();
         if jsonPayload is http:ClientError {
@@ -128,18 +128,18 @@ service /api on new http:Listener(8080) {
                 statusCode: 400
             };
         }
-        
+
         GroupMeetingRequest payload = check jsonPayload.cloneWithType(GroupMeetingRequest);
-        
+
         // Generate a unique meeting ID
         string meetingId = uuid:createType1AsString();
 
         // Process participants
         MeetingParticipant[] participants = check processParticipants(
-            username, 
-            payload.participantIds
+                username,
+                payload.participantIds
         );
-        
+
         // Create the meeting record - without time slots
         Meeting meeting = {
             id: meetingId,
@@ -159,11 +159,11 @@ service /api on new http:Listener(8080) {
             meetingId: meetingId,
             isAdmin: true
         };
-        
+
         // Insert the meeting into MongoDB
         _ = check mongodb:meetingCollection->insertOne(meeting);
         _ = check mongodb:meetinguserCollection->insertOne(meetingAssignment);
-        
+
         // Store creator's availability in the availability collection
         Availability creatorAvailability = {
             id: uuid:createType1AsString(),
@@ -171,23 +171,23 @@ service /api on new http:Listener(8080) {
             meetingId: meetingId,
             timeSlots: payload.groupTimeSlots
         };
-        
+
         _ = check mongodb:availabilityCollection->insertOne(creatorAvailability);
-        
+
         // Create and insert notification
         Notification notification = check createMeetingNotification(
-            meetingId, 
-            meeting.title, 
-            "group", 
-            participants
+                meetingId,
+                meeting.title,
+                "group",
+                participants
         );
-        
+
         // Add the creator to the notification recipients
         notification.toWhom.push(username);
-        
+
         // Insert the notification
         _ = check mongodb:notificationCollection->insertOne(notification);
-        
+
         return meeting;
     }
 
@@ -201,7 +201,7 @@ service /api on new http:Listener(8080) {
                 statusCode: 401
             };
         }
-        
+
         // Parse the request payload
         json|http:ClientError jsonPayload = req.getJsonPayload();
         if jsonPayload is http:ClientError {
@@ -210,24 +210,24 @@ service /api on new http:Listener(8080) {
                 statusCode: 400
             };
         }
-        
+
         RoundRobinMeetingRequest payload = check jsonPayload.cloneWithType(RoundRobinMeetingRequest);
-        
+
         // Generate a unique meeting ID
         string meetingId = uuid:createType1AsString();
-        
+
         // Process hosts
         MeetingParticipant[] hosts = check processHosts(
-            username, 
-            payload.hostIds
+                username,
+                payload.hostIds
         );
-        
+
         // Process participants
         MeetingParticipant[] participants = check processParticipants(
-            username, 
-            payload.participantIds
+                username,
+                payload.participantIds
         );
-        
+
         // Create the meeting record - without time slots
         Meeting meeting = {
             id: meetingId,
@@ -241,7 +241,7 @@ service /api on new http:Listener(8080) {
             hosts: hosts,
             participants: participants
         };
-        
+
         // Create meeting assignments for the meeting creator
         MeetingAssignment creatorAssignment = {
             id: uuid:createType1AsString(),
@@ -250,7 +250,7 @@ service /api on new http:Listener(8080) {
             isAdmin: true
         };
         _ = check mongodb:meetinguserCollection->insertOne(creatorAssignment);
-        
+
         // Create meeting assignments for each host
         foreach MeetingParticipant host in hosts {
             MeetingAssignment hostAssignment = {
@@ -261,7 +261,7 @@ service /api on new http:Listener(8080) {
             };
             _ = check mongodb:meetinguserCollection->insertOne(hostAssignment);
         }
-        
+
         // Store creator's availability in the availability collection
         Availability creatorAvailability = {
             id: uuid:createType1AsString(),
@@ -269,32 +269,32 @@ service /api on new http:Listener(8080) {
             meetingId: meetingId,
             timeSlots: payload.roundRobinTimeSlots
         };
-        
+
         _ = check mongodb:availabilityCollection->insertOne(creatorAvailability);
-        
+
         // Insert the meeting into MongoDB
         _ = check mongodb:meetingCollection->insertOne(meeting);
-        
+
         // Create and insert notification
         Notification notification = check createMeetingNotification(
-            meetingId, 
-            meeting.title, 
-            "round_robin", 
-            participants,
-            hosts
+                meetingId,
+                meeting.title,
+                "round_robin",
+                participants,
+                hosts
         );
-        
+
         // Add the creator to the notification recipients
         notification.toWhom.push(username);
-        
+
         // Insert the notification
         _ = check mongodb:notificationCollection->insertOne(notification);
-        
+
         return meeting;
     }
 
     // endpoint to cancel meetings
-     resource function delete meetings/[string meetingId](http:Request req) returns json|http:Response|error {
+    resource function delete meetings/[string meetingId](http:Request req) returns json|http:Response|error {
         // Extract username from cookie
         string? username = check validateAndGetUsernameFromCookie(req);
         if username is () {
@@ -305,12 +305,12 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         // Get the meeting to check if user has permission to cancel
         map<json> filter = {
             "id": meetingId
         };
-        
+
         record {}|() rawMeeting = check mongodb:meetingCollection->findOne(filter);
         if rawMeeting is () {
             http:Response response = new;
@@ -320,14 +320,14 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         // Convert to Meeting type
         json meetingJson = rawMeeting.toJson();
         Meeting meeting = check meetingJson.cloneWithType(Meeting);
-        
+
         // Check if the user is the creator or a host
         boolean hasPermission = false;
-        
+
         if meeting.createdBy == username {
             hasPermission = true;
         } else if meeting.meetingType == "round_robin" && meeting?.hosts is MeetingParticipant[] {
@@ -338,7 +338,7 @@ service /api on new http:Listener(8080) {
                 }
             }
         }
-        
+
         if !hasPermission {
             http:Response response = new;
             response.statusCode = 403;
@@ -347,7 +347,7 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         // Collect all related users for notification
         string[] allUsers = [];
         string[] emailRecipients = [];
@@ -356,13 +356,13 @@ service /api on new http:Listener(8080) {
             map<json> settingsFilter = {
                 "username": userUsername
             };
-            
+
             record {}|() settingsRecord = check mongodb:notificationSettingsCollection->findOne(settingsFilter);
-            
+
             if settingsRecord is record {} {
                 json settingsJson = settingsRecord.toJson();
                 NotificationSettings settings = check settingsJson.cloneWithType(NotificationSettings);
-                
+
                 if settings.email_notifications {
                     emailRecipients.push(userUsername);
                 }
@@ -370,12 +370,12 @@ service /api on new http:Listener(8080) {
         }
         // Add creator to users
         allUsers.push(meeting.createdBy);
-        
+
         // Add participants to users
         foreach MeetingParticipant participant in meeting?.participants ?: [] {
             allUsers.push(participant.username);
         }
-        
+
         // Add hosts to users if it's a round robin meeting
         if meeting.meetingType == "round_robin" && meeting?.hosts is MeetingParticipant[] {
             foreach MeetingParticipant host in meeting?.hosts ?: [] {
@@ -387,13 +387,13 @@ service /api on new http:Listener(8080) {
                         break;
                     }
                 }
-                
+
                 if !alreadyExists {
                     allUsers.push(host.username);
                 }
             }
         }
-        
+
         // Create cancellation notification
         Notification notification = {
             id: uuid:createType1AsString(),
@@ -404,40 +404,40 @@ service /api on new http:Listener(8080) {
             toWhom: allUsers,
             createdAt: time:utcToString(time:utcNow()) // Add the current time as ISO string
         };
-        
+
         // Insert notification
         _ = check mongodb:notificationCollection->insertOne(notification);
-        
+
         // Delete meeting and all related records
-        
+
         // 1. Delete the meeting
         _ = check mongodb:meetingCollection->deleteOne(filter);
 
         if emailRecipients.length() > 0 {
             // Collect email addresses for all recipients
             map<string> participantEmails = check collectParticipantEmails(emailRecipients);
-            
+
             // Send email notifications
             error? emailResult = sendEmailNotifications(notification, meeting, participantEmails);
-            
+
             if emailResult is error {
                 log:printError("Failed to send email notifications for cancellation", emailResult);
                 // Continue execution even if email sending fails
             }
         }
-        
+
         // 2. Delete meeting assignments
         map<json> assignmentFilter = {
             "meetingId": meetingId
         };
         _ = check mongodb:meetinguserCollection->deleteMany(assignmentFilter);
-        
+
         // 3. Delete availabilities
         map<json> availabilityFilter = {
             "meetingId": meetingId
         };
         _ = check mongodb:availabilityCollection->deleteMany(availabilityFilter);
-        
+
         return {
             "status": "success",
             "message": "Meeting canceled successfully"
@@ -456,35 +456,35 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         // Check if notifications are enabled for this user
         map<json> settingsFilter = {
             "username": username
         };
-        
+
         record {}|() settingsRecord = check mongodb:notificationSettingsCollection->findOne(settingsFilter);
         boolean notificationsEnabled = true; // Default to enabled
-        
+
         if settingsRecord is record {} {
             json settingsJson = settingsRecord.toJson();
             NotificationSettings settings = check settingsJson.cloneWithType(NotificationSettings);
             notificationsEnabled = settings.notifications_enabled;
         }
-        
+
         // If notifications are disabled, return empty array
         if !notificationsEnabled {
             return [];
         }
-        
+
         // Create a filter to find notifications for this user
         map<json> filter = {
             "toWhom": username
         };
-        
+
         // Query the notifications collection
         stream<record {}, error?> notifCursor = check mongodb:notificationCollection->find(filter);
         Notification[] notifications = [];
-        
+
         // Process the results
         check from record {} notifData in notifCursor
             do {
@@ -492,8 +492,130 @@ service /api on new http:Listener(8080) {
                 Notification notification = check notifJson.cloneWithType(Notification);
                 notifications.push(notification);
             };
-        
+
         return notifications;
+    }
+
+    // Endpoint to mark all notifications as read for the authenticated user
+    resource function put notifications/markallread(http:Request req) returns json|http:Response|error {
+        // Extract username from cookie
+        string? username = check validateAndGetUsernameFromCookie(req);
+        if username is () {
+            http:Response response = new;
+            response.statusCode = 401;
+            response.setJsonPayload({
+                message: "Unauthorized: Invalid or missing authentication token"
+            });
+            return response;
+        }
+
+        // Create a filter to find all notifications for this user
+        map<json> filter = {
+            "toWhom": username,
+            "isRead": false // Only update unread notifications
+        };
+
+        // Create the update operation properly typed as mongodb:Update
+        mongodb:Update updateOperation = {
+            "set": {
+                "isRead": true
+            }
+        };
+
+        // Update all matching notifications
+        mongodb:UpdateResult result = check mongodb:notificationCollection->updateMany(filter, updateOperation);
+
+        // Return the result with count of modified documents
+        return {
+            "status": "success",
+            "message": "All notifications marked as read",
+            "modifiedCount": result.modifiedCount
+        };
+    }
+
+    // Endpoint to mark a single notification as read
+    resource function put notifications/[string notificationId]/read(http:Request req) returns json|http:Response|error {
+        // Extract username from cookie
+        string? username = check validateAndGetUsernameFromCookie(req);
+        if username is () {
+            http:Response response = new;
+            response.statusCode = 401;
+            response.setJsonPayload({
+                message: "Unauthorized: Invalid or missing authentication token"
+            });
+            return response;
+        }
+
+        // Check if the notification exists and is for this user
+        map<json> filter = {
+            "id": notificationId,
+            "toWhom": username
+        };
+
+        record {}|() notification = check mongodb:notificationCollection->findOne(filter);
+        if notification is () {
+            http:Response response = new;
+            response.statusCode = 404;
+            response.setJsonPayload({
+                message: "Notification not found or you don't have access to it"
+            });
+            return response;
+        }
+
+        // Create the update operation properly typed as mongodb:Update
+        mongodb:Update updateOperation = {
+            "set": {
+                "isRead": true
+            }
+        };
+
+        // Update the notification
+        _ = check mongodb:notificationCollection->updateOne(filter, updateOperation);
+
+        return {
+            "status": "success",
+            "message": "Notification marked as read",
+            "notificationId": notificationId
+        };
+    }
+
+    // Endpoint to delete a single notification
+    resource function delete notifications/[string notificationId](http:Request req) returns json|http:Response|error {
+        // Extract username from cookie
+        string? username = check validateAndGetUsernameFromCookie(req);
+        if username is () {
+            http:Response response = new;
+            response.statusCode = 401;
+            response.setJsonPayload({
+                message: "Unauthorized: Invalid or missing authentication token"
+            });
+            return response;
+        }
+        
+        // Check if the notification exists and is for this user
+        map<json> filter = {
+            "id": notificationId,
+            "toWhom": username
+        };
+        
+        record {}|() notification = check mongodb:notificationCollection->findOne(filter);
+        if notification is () {
+            http:Response response = new;
+            response.statusCode = 404;
+            response.setJsonPayload({
+                message: "Notification not found or you don't have access to it"
+            });
+            return response;
+        }
+        
+        // Delete the notification
+        _ = check mongodb:notificationCollection->deleteOne(filter);
+        
+        return {
+            "status": "success",
+            "message": "Notification deleted successfully",
+            "notificationId": notificationId
+        };
     }
 
     // Updated endpoint to submit availability with cookie authentication
@@ -506,7 +628,7 @@ service /api on new http:Listener(8080) {
                 statusCode: 401
             };
         }
-        
+
         // Parse the request payload
         json|http:ClientError jsonPayload = req.getJsonPayload();
         if jsonPayload is http:ClientError {
@@ -516,20 +638,20 @@ service /api on new http:Listener(8080) {
             };
         }
         Availability payload = check jsonPayload.cloneWithType(Availability);
-        
+
         // Ensure the username in the payload matches the authenticated user
         payload.username = username;
-        
+
         // Generate an ID if not provided
         if (payload.id == "") {
             payload.id = uuid:createType1AsString();
         }
-        
+
         // Check if the meeting exists
         map<json> meetingFilter = {
             "id": payload.meetingId
         };
-        
+
         record {}|() meeting = check mongodb:meetingCollection->findOne(meetingFilter);
         if meeting is () {
             return {
@@ -537,15 +659,15 @@ service /api on new http:Listener(8080) {
                 statusCode: 404
             };
         }
-        
+
         // Check if availability already exists for this user and meeting
         map<json> availFilter = {
             "username": username,
             "meetingId": payload.meetingId
         };
-        
+
         record {}|() existingAvailability = check mongodb:availabilityCollection->findOne(availFilter);
-        
+
         if existingAvailability is () {
             // Insert new availability
             _ = check mongodb:availabilityCollection->insertOne(payload);
@@ -556,10 +678,10 @@ service /api on new http:Listener(8080) {
                 {"set": {"timeSlots": <json>payload.timeSlots}}
             );
         }
-        
+
         return payload;
     }
-    
+
     // Updated endpoint to get availability with cookie authentication
     resource function get availability/[string meetingId](http:Request req) returns Availability[]|ErrorResponse|error {
         // Extract username from cookie
@@ -570,16 +692,16 @@ service /api on new http:Listener(8080) {
                 statusCode: 401
             };
         }
-        
+
         // Create a filter to find availabilities for this meeting
         map<json> filter = {
             "meetingId": meetingId
         };
-        
+
         // Query the availability collection
         stream<record {}, error?> availCursor = check mongodb:availabilityCollection->find(filter);
         Availability[] availabilities = [];
-        
+
         // Process the results
         check from record {} availData in availCursor
             do {
@@ -587,10 +709,9 @@ service /api on new http:Listener(8080) {
                 Availability avail = check availJson.cloneWithType(Availability);
                 availabilities.push(avail);
             };
-        
+
         return availabilities;
     }
-
 
     // Endpoint to get all confirmed meetings for the logged-in user
     resource function get confirmed/meetings(http:Request req) returns Meeting[]|ErrorResponse|error {
@@ -602,10 +723,10 @@ service /api on new http:Listener(8080) {
                 statusCode: 401
             };
         }
-        
+
         Meeting[] confirmedMeetings = [];
         map<string> meetingIds = {}; // To track already added meetings
-        
+
         // 1. Find direct meetings (always confirmed)
         map<json> directFilter = {
             "meetingType": "direct",
@@ -614,26 +735,26 @@ service /api on new http:Listener(8080) {
                 {"participants": {"$elemMatch": {"username": username}}}
             ]
         };
-        
+
         stream<record {}, error?> directCursor = check mongodb:meetingCollection->find(directFilter);
-        
+
         // Process direct meetings
         check from record {} meetingData in directCursor
             do {
                 json jsonData = meetingData.toJson();
                 Meeting meeting = check jsonData.cloneWithType(Meeting);
-                
+
                 // Set role
                 if (meeting.createdBy == username) {
                     meeting["role"] = "creator";
                 } else {
                     meeting["role"] = "participant";
                 }
-                
+
                 confirmedMeetings.push(meeting);
                 meetingIds[meeting.id] = "added";
             };
-        
+
         // 2. Find confirmed group/round_robin meetings 
         map<json> confirmedFilter = {
             "status": "confirmed",
@@ -653,15 +774,15 @@ service /api on new http:Listener(8080) {
                 }
             ]
         };
-        
+
         stream<record {}, error?> confirmedCursor = check mongodb:meetingCollection->find(confirmedFilter);
-        
+
         // Process confirmed meetings
         check from record {} meetingData in confirmedCursor
             do {
                 json jsonData = meetingData.toJson();
                 Meeting meeting = check jsonData.cloneWithType(Meeting);
-                
+
                 // Skip if already added
                 if (!meetingIds.hasKey(meeting.id)) {
                     // Determine role
@@ -678,19 +799,19 @@ service /api on new http:Listener(8080) {
                                 }
                             }
                         }
-                        
+
                         if (isHost) {
                             meeting["role"] = "host";
                         } else {
                             meeting["role"] = "participant";
                         }
                     }
-                    
+
                     confirmedMeetings.push(meeting);
                     meetingIds[meeting.id] = "added";
                 }
             };
-        
+
         // 3. Auto-confirm pending meetings
         // Get all pending meetings related to the user
         map<json> pendingFilter = {
@@ -711,19 +832,19 @@ service /api on new http:Listener(8080) {
                 }
             ]
         };
-        
+
         stream<record {}, error?> pendingCursor = check mongodb:meetingCollection->find(pendingFilter);
-        
+
         // Process pending meetings and check if they should be confirmed
         check from record {} meetingData in pendingCursor
             do {
                 json jsonData = meetingData.toJson();
                 Meeting meeting = check jsonData.cloneWithType(Meeting);
-                
+
                 // Try to auto-confirm this meeting
                 check checkAndFinalizeTimeSlot(meeting);
             };
-        
+
         // 4. Run another query to get newly confirmed meetings
         map<json> newlyConfirmedFilter = {
             "status": "confirmed",
@@ -743,15 +864,15 @@ service /api on new http:Listener(8080) {
                 }
             ]
         };
-        
+
         stream<record {}, error?> newConfirmedCursor = check mongodb:meetingCollection->find(newlyConfirmedFilter);
-        
+
         // Process newly confirmed meetings
         check from record {} meetingData in newConfirmedCursor
             do {
                 json jsonData = meetingData.toJson();
                 Meeting meeting = check jsonData.cloneWithType(Meeting);
-                
+
                 // Skip if already added
                 if (!meetingIds.hasKey(meeting.id)) {
                     // Determine role
@@ -767,7 +888,7 @@ service /api on new http:Listener(8080) {
                                 }
                             }
                         }
-                        
+
                         if (isHost) {
                             meeting["role"] = "host";
                         } else {
@@ -776,16 +897,16 @@ service /api on new http:Listener(8080) {
                     } else {
                         meeting["role"] = "participant";
                     }
-                    
+
                     confirmedMeetings.push(meeting);
                 }
             };
-        
+
         // 5. Sort the meetings (manual approach without template literals)
         // Separate meetings with and without time slots
         Meeting[] meetingsWithTime = [];
         Meeting[] meetingsWithoutTime = [];
-        
+
         foreach Meeting mtg in confirmedMeetings {
             if mtg?.directTimeSlot is TimeSlot {
                 meetingsWithTime.push(mtg);
@@ -793,7 +914,7 @@ service /api on new http:Listener(8080) {
                 meetingsWithoutTime.push(mtg);
             }
         }
-        
+
         // Manual bubble sort for meetings with time
         int n = meetingsWithTime.length();
         int i = 0;
@@ -802,7 +923,7 @@ service /api on new http:Listener(8080) {
             while (j < n - i - 1) {
                 TimeSlot ts1 = <TimeSlot>meetingsWithTime[j]?.directTimeSlot;
                 TimeSlot ts2 = <TimeSlot>meetingsWithTime[j + 1]?.directTimeSlot;
-                
+
                 if (ts1.startTime > ts2.startTime) {
                     // Swap
                     Meeting temp = meetingsWithTime[j];
@@ -813,7 +934,7 @@ service /api on new http:Listener(8080) {
             }
             i = i + 1;
         }
-        
+
         // Combine the sorted arrays
         Meeting[] sortedMeetings = [];
         foreach Meeting mtg in meetingsWithTime {
@@ -822,7 +943,7 @@ service /api on new http:Listener(8080) {
         foreach Meeting mtg in meetingsWithoutTime {
             sortedMeetings.push(mtg);
         }
-        
+
         return sortedMeetings;
     }
 
@@ -862,7 +983,7 @@ service /api on new http:Listener(8080) {
         if meeting.createdBy == username {
             hasPermission = true;
             userRole = "creator";
-        } 
+        }
         // Check if user is host (for round robin meetings)
         else if meeting?.hosts is MeetingParticipant[] {
             foreach MeetingParticipant host in meeting?.hosts ?: [] {
@@ -954,7 +1075,7 @@ service /api on new http:Listener(8080) {
         // Check if user is creator
         if meeting.createdBy == username {
             hasPermission = true;
-        } 
+        }
         // Check if user is host (for round robin meetings)
         else if meeting?.hosts is MeetingParticipant[] {
             foreach MeetingParticipant host in meeting?.hosts ?: [] {
@@ -999,7 +1120,7 @@ service /api on new http:Listener(8080) {
 
         return contents;
     }
-    
+
     resource function get meeting/[string meetingId]/availabilities(http:Request req) returns ParticipantAvailability[]|http:Response|error {
         // Extract username from cookie
         string? username = check validateAndGetUsernameFromCookie(req);
@@ -1011,12 +1132,12 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         // Check if the meeting exists
         map<json> meetingFilter = {
             "id": meetingId
         };
-        
+
         record {}|() meeting = check mongodb:meetingCollection->findOne(meetingFilter);
         if meeting is () {
             http:Response response = new;
@@ -1026,14 +1147,14 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         // Convert to Meeting type
         json meetingJson = meeting.toJson();
         Meeting meetingData = check meetingJson.cloneWithType(Meeting);
-        
+
         // Verify that the user has permission to view availabilities
         boolean hasPermission = false;
-        
+
         // Creators and hosts can view all availabilities
         if (meetingData.createdBy == username) {
             hasPermission = true;
@@ -1055,7 +1176,7 @@ service /api on new http:Listener(8080) {
                 }
             }
         }
-        
+
         if (!hasPermission) {
             http:Response response = new;
             response.statusCode = 403;
@@ -1064,16 +1185,16 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         // Create a filter to find availabilities for this meeting
         map<json> filter = {
             "meetingId": meetingId
         };
-        
+
         // Query the participant availability collection
         stream<record {}, error?> availCursor = check mongodb:participantAvailabilityCollection->find(filter);
         ParticipantAvailability[] availabilities = [];
-        
+
         // Process the results
         check from record {} availData in availCursor
             do {
@@ -1081,32 +1202,32 @@ service /api on new http:Listener(8080) {
                 ParticipantAvailability avail = check availJson.cloneWithType(ParticipantAvailability);
                 availabilities.push(avail);
             };
-        
+
         // Check for a suggested best time in temporarySuggestionsCollection
         map<json> suggestedTimeFilter = {
             "meetingId": meetingId
         };
-        
+
         record {}|() suggestedTimeRecord = check mongodb:temporarySuggestionsCollection->findOne(suggestedTimeFilter);
-        
+
         // If there's a suggested best time, mark the corresponding time slots
         if (suggestedTimeRecord is record {}) {
             json suggestedTimeJson = suggestedTimeRecord.toJson();
             if (suggestedTimeJson is map<json> && (<map<json>>suggestedTimeJson).hasKey("suggestedTimeSlot")) {
                 json suggestedTimeSlotJson = check suggestedTimeJson.suggestedTimeSlot;
                 TimeSlot suggestedTimeSlot = check suggestedTimeSlotJson.cloneWithType(TimeSlot);
-                
+
                 // Mark the best time slot in each participant's availability
                 foreach int i in 0 ..< availabilities.length() {
                     TimeSlot[] timeSlots = availabilities[i].timeSlots;
                     TimeSlot[] updatedTimeSlots = [];
-                    
+
                     foreach TimeSlot slot in timeSlots {
                         // Create a copy of the time slot
                         TimeSlot updatedSlot = slot.clone();
-                        
+
                         // Check if this is the suggested best time slot
-                        if (slot.startTime == suggestedTimeSlot.startTime && 
+                        if (slot.startTime == suggestedTimeSlot.startTime &&
                             slot.endTime == suggestedTimeSlot.endTime) {
                             // Mark this as the best time slot by adding a flag
                             json updatedSlotJson = slot.toJson();
@@ -1114,14 +1235,14 @@ service /api on new http:Listener(8080) {
                             slotMap["isBestTimeSlot"] = true;
                             updatedSlot = check slotMap.cloneWithType(TimeSlot);
                         }
-                        
+
                         updatedTimeSlots.push(updatedSlot);
                     }
-                    
+
                     // Update the time slots with the marked best time slot
                     availabilities[i].timeSlots = updatedTimeSlots;
                 }
-                
+
                 // Create a response object that includes both the availabilities and the best time slot
                 http:Response enhancedResponse = new;
                 enhancedResponse.setJsonPayload({
@@ -1132,7 +1253,7 @@ service /api on new http:Listener(8080) {
                 return enhancedResponse;
             }
         }
-        
+
         // If no best time slot was found, return just the availabilities array
         return availabilities;
     }
@@ -1148,7 +1269,7 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         // Parse the request payload
         json|http:ClientError jsonPayload = req.getJsonPayload();
         if jsonPayload is http:ClientError {
@@ -1159,27 +1280,27 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         ParticipantAvailability payload = check jsonPayload.cloneWithType(ParticipantAvailability);
-        
+
         // Ensure the username in the payload matches the authenticated user
         payload.username = username;
-        
+
         // Generate an ID if not provided
         if (payload.id == "") {
             payload.id = uuid:createType1AsString();
         }
-        
+
         // Set submitted time if not provided
         if (payload.submittedAt == "") {
             payload.submittedAt = time:utcToString(time:utcNow());
         }
-        
+
         // Check if the meeting exists
         map<json> meetingFilter = {
             "id": payload.meetingId
         };
-        
+
         record {}|() meeting = check mongodb:meetingCollection->findOne(meetingFilter);
         if meeting is () {
             http:Response response = new;
@@ -1189,15 +1310,15 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         // Convert meeting to get its type
         json meetingJson = meeting.toJson();
         Meeting meetingData = check meetingJson.cloneWithType(Meeting);
-        
+
         // Verify that the user is a participant or host of the meeting
         boolean isParticipantOrHost = false;
         string userRole = "";
-        
+
         // Check if user is participant
         if (meetingData?.participants is MeetingParticipant[]) {
             foreach MeetingParticipant p in meetingData?.participants ?: [] {
@@ -1208,7 +1329,7 @@ service /api on new http:Listener(8080) {
                 }
             }
         }
-        
+
         // Check if user is host (for round robin meetings)
         if (!isParticipantOrHost && meetingData.meetingType == "round_robin" && meetingData?.hosts is MeetingParticipant[]) {
             foreach MeetingParticipant h in meetingData?.hosts ?: [] {
@@ -1219,13 +1340,13 @@ service /api on new http:Listener(8080) {
                 }
             }
         }
-        
+
         // Check if user is the creator
         if (!isParticipantOrHost && meetingData.createdBy == username) {
             isParticipantOrHost = true;
             userRole = "creator";
         }
-        
+
         if (!isParticipantOrHost) {
             http:Response response = new;
             response.statusCode = 403;
@@ -1234,23 +1355,23 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         // Check if availability already exists for this user and meeting
         map<json> availFilter = {
             "username": username,
             "meetingId": payload.meetingId
         };
-        
+
         record {}|() existingAvailability = check mongodb:participantAvailabilityCollection->findOne(availFilter);
-        
+
         // Convert TimeSlots to a list of json objects explicitly
-        json[] timeSlotJsonArray = payload.timeSlots.map(function (TimeSlot slot) returns json {
+        json[] timeSlotJsonArray = payload.timeSlots.map(function(TimeSlot slot) returns json {
             return {
                 startTime: slot.startTime,
                 endTime: slot.endTime
             };
         });
-        
+
         // Prepare the document for insertion or update
         map<json> insertPayload = {
             "id": payload.id,
@@ -1259,7 +1380,7 @@ service /api on new http:Listener(8080) {
             "timeSlots": timeSlotJsonArray,
             "submittedAt": payload.submittedAt
         };
-        
+
         if existingAvailability is () {
             // Insert new availability
             _ = check mongodb:participantAvailabilityCollection->insertOne(insertPayload);
@@ -1271,105 +1392,22 @@ service /api on new http:Listener(8080) {
                     "submittedAt": payload.submittedAt
                 }
             };
-            
+
             _ = check mongodb:participantAvailabilityCollection->updateOne(
                 availFilter,
                 updateOperation
             );
         }
-        
+
         // If this is a round robin meeting and the user is a host, check if all hosts have submitted availability
         if (meetingData.meetingType == "round_robin" && userRole == "host") {
             check checkAndNotifyParticipantsForRoundRobin(meetingData);
         }
-        
+
         // For any meeting type, check if deadline has passed and find the best time slot
         check checkAndFinalizeTimeSlot(meetingData);
-        
+
         return payload;
-    }
-
-    // Endpoint to mark all notifications as read for the authenticated user
-    resource function put notifications/markallread(http:Request req) returns json|http:Response|error {
-        // Extract username from cookie
-        string? username = check validateAndGetUsernameFromCookie(req);
-        if username is () {
-            http:Response response = new;
-            response.statusCode = 401;
-            response.setJsonPayload({
-                message: "Unauthorized: Invalid or missing authentication token"
-            });
-            return response;
-        }
-        
-        // Create a filter to find all notifications for this user
-        map<json> filter = {
-            "toWhom": username,
-            "isRead": false // Only update unread notifications
-        };
-        
-        // Create the update operation properly typed as mongodb:Update
-        mongodb:Update updateOperation = {
-            "set": {
-                "isRead": true
-            }
-        };
-        
-        // Update all matching notifications
-        mongodb:UpdateResult result = check mongodb:notificationCollection->updateMany(filter, updateOperation);
-        
-        // Return the result with count of modified documents
-        return {
-            "status": "success",
-            "message": "All notifications marked as read",
-            "modifiedCount": result.modifiedCount
-        };
-    }
-
-    // Endpoint to mark a single notification as read
-    resource function put notifications/[string notificationId]/read(http:Request req) returns json|http:Response|error {
-        // Extract username from cookie
-        string? username = check validateAndGetUsernameFromCookie(req);
-        if username is () {
-            http:Response response = new;
-            response.statusCode = 401;
-            response.setJsonPayload({
-                message: "Unauthorized: Invalid or missing authentication token"
-            });
-            return response;
-        }
-        
-        // Check if the notification exists and is for this user
-        map<json> filter = {
-            "id": notificationId,
-            "toWhom": username
-        };
-        
-        record {}|() notification = check mongodb:notificationCollection->findOne(filter);
-        if notification is () {
-            http:Response response = new;
-            response.statusCode = 404;
-            response.setJsonPayload({
-                message: "Notification not found or you don't have access to it"
-            });
-            return response;
-        }
-        
-        // Create the update operation properly typed as mongodb:Update
-        mongodb:Update updateOperation = {
-            "set": {
-                "isRead": true
-            }
-        };
-        
-        // Update the notification
-        _ = check mongodb:notificationCollection->updateOne(filter, updateOperation);
-        
-        return {
-            "status": "success",
-            "message": "Notification marked as read",
-            "notificationId": notificationId
-        };
     }
 
     // Endpoint to get participant availability for a meeting (with username filter)
@@ -1384,12 +1422,12 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         // Check if the meeting exists
         map<json> meetingFilter = {
             "id": meetingId
         };
-        
+
         record {}|() meeting = check mongodb:meetingCollection->findOne(meetingFilter);
         if meeting is () {
             http:Response response = new;
@@ -1399,15 +1437,15 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         // Convert to Meeting type
         json meetingJson = meeting.toJson();
         Meeting meetingData = check meetingJson.cloneWithType(Meeting);
-        
+
         // Verify that the user has permission to view availabilities
         boolean hasPermission = false;
         boolean isCreatorOrHost = false;
-        
+
         // Creators and hosts can view all availabilities
         if (meetingData.createdBy == username) {
             hasPermission = true;
@@ -1421,7 +1459,7 @@ service /api on new http:Listener(8080) {
                 }
             }
         }
-        
+
         // Participants can only view their own availability
         if (!hasPermission) {
             // Check if user is a participant
@@ -1434,7 +1472,7 @@ service /api on new http:Listener(8080) {
                 }
             }
         }
-        
+
         if (!hasPermission) {
             http:Response response = new;
             response.statusCode = 403;
@@ -1443,10 +1481,10 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         // Create a filter to find availabilities
         map<json> filter;
-        
+
         // Creators and hosts can view all availabilities, participants can only view their own
         if (isCreatorOrHost) {
             filter = {
@@ -1459,11 +1497,11 @@ service /api on new http:Listener(8080) {
                 "username": username
             };
         }
-        
+
         // Query the participant availability collection
         stream<record {}, error?> availCursor = check mongodb:participantAvailabilityCollection->find(filter);
         ParticipantAvailability[] availabilities = [];
-        
+
         // Process the results
         check from record {} availData in availCursor
             do {
@@ -1471,32 +1509,32 @@ service /api on new http:Listener(8080) {
                 ParticipantAvailability avail = check availJson.cloneWithType(ParticipantAvailability);
                 availabilities.push(avail);
             };
-        
+
         // Check for a suggested best time in temporarySuggestionsCollection
         if (isCreatorOrHost) {
             map<json> suggestedTimeFilter = {
                 "meetingId": meetingId
             };
-            
+
             record {}|() suggestedTimeRecord = check mongodb:temporarySuggestionsCollection->findOne(suggestedTimeFilter);
-            
+
             // If there's a suggested best time, mark the corresponding time slots
             if (suggestedTimeRecord is record {}) {
                 json suggestedTimeJson = suggestedTimeRecord.toJson();
                 json suggestedTimeSlotJson = check suggestedTimeJson.suggestedTimeSlot;
                 TimeSlot suggestedTimeSlot = check suggestedTimeSlotJson.cloneWithType(TimeSlot);
-                
+
                 // Mark the best time slot in each participant's availability
                 foreach int i in 0 ..< availabilities.length() {
                     TimeSlot[] timeSlots = availabilities[i].timeSlots;
                     TimeSlot[] updatedTimeSlots = [];
-                    
+
                     foreach TimeSlot slot in timeSlots {
                         // Create a copy of the time slot
                         TimeSlot updatedSlot = slot.clone();
-                        
+
                         // Check if this is the suggested best time slot
-                        if (slot.startTime == suggestedTimeSlot.startTime && 
+                        if (slot.startTime == suggestedTimeSlot.startTime &&
                             slot.endTime == suggestedTimeSlot.endTime) {
                             // Mark this as the best time slot by adding a flag
                             json updatedSlotJson = slot.toJson();
@@ -1507,29 +1545,29 @@ service /api on new http:Listener(8080) {
 
                         updatedTimeSlots.push(updatedSlot);
                     }
-                    
+
                     // Update the time slots with the marked best time slot
                     availabilities[i].timeSlots = updatedTimeSlots;
                 }
-                
+
                 // Add the best time slot as a metadata property to the response
                 // Since we can't directly modify the return type, we'll include it in a custom field
-                json availabilitiesJson = check  availabilities.toJson().cloneWithType(json);
-                
+                json availabilitiesJson = check availabilities.toJson().cloneWithType(json);
+
                 // Create a response object that includes both the availabilities and the best time slot
                 map<json> responseJson = {
                     "availabilities": availabilitiesJson,
                     "bestTimeSlot": suggestedTimeSlotJson,
                     "hasSuggestedTime": true
                 };
-                
+
                 // Return the enhanced response
                 http:Response enhancedResponse = new;
                 enhancedResponse.setJsonPayload(responseJson);
                 return enhancedResponse;
             }
         }
-        
+
         // If no best time slot was found or the user is not a creator/host,
         // return the regular availabilities array
         return availabilities;
@@ -1544,7 +1582,7 @@ service /api on new http:Listener(8080) {
                 statusCode: 401
             };
         }
-        
+
         // Parse the request payload
         json|http:ClientError jsonPayload = req.getJsonPayload();
         if jsonPayload is http:ClientError {
@@ -1553,28 +1591,28 @@ service /api on new http:Listener(8080) {
                 statusCode: 400
             };
         }
-        
+
         // Look for existing settings
         map<json> filter = {
             "username": username
         };
-        
+
         record {}|() settingsRecord = check mongodb:notificationSettingsCollection->findOne(filter);
-        
+
         // Current time for timestamps
         string currentTime = time:utcToString(time:utcNow());
-        
+
         // Extract settings from payload
         map<json> updateFields = <map<json>>jsonPayload;
         map<json> updateOperations = {
             "updatedAt": currentTime
         };
-        
+
         // Process notification settings fields
         if updateFields.hasKey("notifications_enabled") {
             json notifValue = updateFields["notifications_enabled"];
             boolean boolValue;
-            
+
             if notifValue is boolean {
                 boolValue = notifValue;
             } else {
@@ -1587,14 +1625,14 @@ service /api on new http:Listener(8080) {
                     boolValue = true; // Default to true if conversion fails
                 }
             }
-            
+
             updateOperations["notifications_enabled"] = boolValue;
         }
-        
+
         if updateFields.hasKey("email_notifications") {
             json emailNotifValue = updateFields["email_notifications"];
             boolean boolValue;
-            
+
             if emailNotifValue is boolean {
                 boolValue = emailNotifValue;
             } else {
@@ -1607,14 +1645,14 @@ service /api on new http:Listener(8080) {
                     boolValue = false; // Default to false if conversion fails
                 }
             }
-            
+
             updateOperations["email_notifications"] = boolValue;
         }
-        
+
         if updateFields.hasKey("sms_notifications") {
             json smsNotifValue = updateFields["sms_notifications"];
             boolean boolValue;
-            
+
             if smsNotifValue is boolean {
                 boolValue = smsNotifValue;
             } else {
@@ -1627,22 +1665,22 @@ service /api on new http:Listener(8080) {
                     boolValue = false; // Default to false if conversion fails
                 }
             }
-            
+
             updateOperations["sms_notifications"] = boolValue;
         }
-        
+
         NotificationSettings resultSettings;
-        
+
         // If settings record exists, update it
         if settingsRecord is record {} {
             // Create update operation
             mongodb:Update updateOperation = {
                 "set": updateOperations
             };
-            
+
             // Update settings
             _ = check mongodb:notificationSettingsCollection->updateOne(filter, updateOperation);
-            
+
             // Get the updated settings
             record {}|() updatedRecord = check mongodb:notificationSettingsCollection->findOne(filter);
             if updatedRecord is () {
@@ -1651,7 +1689,7 @@ service /api on new http:Listener(8080) {
                     statusCode: 500
                 };
             }
-            
+
             // Convert to NotificationSettings type
             json updatedJson = updatedRecord.toJson();
             resultSettings = check updatedJson.cloneWithType(NotificationSettings);
@@ -1660,7 +1698,7 @@ service /api on new http:Listener(8080) {
             boolean notificationsEnabled = true;
             boolean emailNotifications = false;
             boolean smsNotifications = false;
-            
+
             // Extract and convert the boolean values
             if updateOperations.hasKey("notifications_enabled") {
                 var value = updateOperations["notifications_enabled"];
@@ -1668,21 +1706,21 @@ service /api on new http:Listener(8080) {
                     notificationsEnabled = value;
                 }
             }
-            
+
             if updateOperations.hasKey("email_notifications") {
                 var value = updateOperations["email_notifications"];
                 if value is boolean {
                     emailNotifications = value;
                 }
             }
-            
+
             if updateOperations.hasKey("sms_notifications") {
                 var value = updateOperations["sms_notifications"];
                 if value is boolean {
                     smsNotifications = value;
                 }
             }
-            
+
             // Create the settings record with the converted values
             NotificationSettings newSettings = {
                 id: uuid:createType1AsString(),
@@ -1693,13 +1731,13 @@ service /api on new http:Listener(8080) {
                 createdAt: currentTime,
                 updatedAt: currentTime
             };
-            
+
             // Insert new settings
             _ = check mongodb:notificationSettingsCollection->insertOne(newSettings);
-            
+
             resultSettings = newSettings;
         }
-        
+
         return resultSettings;
     }
 
@@ -1713,14 +1751,14 @@ service /api on new http:Listener(8080) {
                 statusCode: 401
             };
         }
-        
+
         // Look for existing settings
         map<json> filter = {
             "username": username
         };
-        
+
         record {}|() settingsRecord = check mongodb:notificationSettingsCollection->findOne(filter);
-        
+
         // If no settings found, create default settings
         if settingsRecord is () {
             string currentTime = time:utcToString(time:utcNow());
@@ -1733,20 +1771,18 @@ service /api on new http:Listener(8080) {
                 createdAt: currentTime,
                 updatedAt: currentTime
             };
-            
+
             // Insert default settings
             _ = check mongodb:notificationSettingsCollection->insertOne(defaultSettings);
             return defaultSettings;
         }
-        
+
         // Convert to NotificationSettings type
         json settingsJson = settingsRecord.toJson();
         NotificationSettings settings = check settingsJson.cloneWithType(NotificationSettings);
-        
+
         return settings;
     }
-
-    
 
     // Endpoint to confirm a suggested meeting time
     resource function post meetings/[string meetingId]/confirm(http:Request req) returns json|http:Response|error {
@@ -1760,12 +1796,12 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         // Get the meeting to check if user has permission
         map<json> filter = {
             "id": meetingId
         };
-        
+
         record {}|() rawMeeting = check mongodb:meetingCollection->findOne(filter);
         if rawMeeting is () {
             http:Response response = new;
@@ -1775,14 +1811,14 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         // Convert to Meeting type
         json meetingJson = rawMeeting.toJson();
         Meeting meeting = check meetingJson.cloneWithType(Meeting);
-        
+
         // Check if user has permission to confirm (creator or host)
         boolean hasPermission = false;
-        
+
         if meeting.createdBy == username {
             hasPermission = true;
         } else if meeting.meetingType == "round_robin" && meeting?.hosts is MeetingParticipant[] {
@@ -1793,7 +1829,7 @@ service /api on new http:Listener(8080) {
                 }
             }
         }
-        
+
         if !hasPermission {
             http:Response response = new;
             response.statusCode = 403;
@@ -1802,7 +1838,7 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         // Parse the request payload to get the timeSlot
         json|http:ClientError jsonPayload = req.getJsonPayload();
         if jsonPayload is http:ClientError {
@@ -1813,10 +1849,10 @@ service /api on new http:Listener(8080) {
             });
             return response;
         }
-        
+
         // Extract time slot from payload
         TimeSlot timeSlot;
-        
+
         // Check if payload has timeSlot
         map<json> payload = <map<json>>jsonPayload;
         if !payload.hasKey("timeSlot") {
@@ -1824,9 +1860,9 @@ service /api on new http:Listener(8080) {
             map<json> suggestedTimeFilter = {
                 "meetingId": meetingId
             };
-            
+
             record {}|() suggestedTimeRecord = check mongodb:temporarySuggestionsCollection->findOne(suggestedTimeFilter);
-            
+
             if suggestedTimeRecord is () {
                 http:Response response = new;
                 response.statusCode = 404;
@@ -1835,7 +1871,7 @@ service /api on new http:Listener(8080) {
                 });
                 return response;
             }
-            
+
             json suggestedTimeJson = (<record {}>suggestedTimeRecord).toJson();
             json suggestedTimeSlotJson = check suggestedTimeJson.suggestedTimeSlot;
             timeSlot = check suggestedTimeSlotJson.cloneWithType(TimeSlot);
@@ -1844,7 +1880,7 @@ service /api on new http:Listener(8080) {
             json timeSlotJson = payload["timeSlot"];
             timeSlot = check timeSlotJson.cloneWithType(TimeSlot);
         }
-        
+
         // Update meeting with confirmed time slot
         mongodb:Update updateDoc = {
             "set": {
@@ -1852,18 +1888,18 @@ service /api on new http:Listener(8080) {
                 "status": "confirmed"
             }
         };
-        
+
         _ = check mongodb:meetingCollection->updateOne(
             {"id": meetingId},
             updateDoc
         );
-        
+
         // Notify all participants about the confirmed time
         string[] recipients = [];
-        
+
         // Add creator
         recipients.push(meeting.createdBy);
-        
+
         // Add participants
         foreach MeetingParticipant p in meeting?.participants ?: [] {
             boolean alreadyExists = false;
@@ -1873,12 +1909,12 @@ service /api on new http:Listener(8080) {
                     break;
                 }
             }
-            
+
             if !alreadyExists {
                 recipients.push(p.username);
             }
         }
-        
+
         // Add hosts for round robin meetings
         if meeting.meetingType == "round_robin" && meeting?.hosts is MeetingParticipant[] {
             foreach MeetingParticipant h in meeting?.hosts ?: [] {
@@ -1889,13 +1925,13 @@ service /api on new http:Listener(8080) {
                         break;
                     }
                 }
-                
+
                 if !alreadyExists {
                     recipients.push(h.username);
                 }
             }
         }
-        
+
         // Create confirmation notification
         Notification notification = {
             id: uuid:createType1AsString(),
@@ -1907,10 +1943,10 @@ service /api on new http:Listener(8080) {
             toWhom: recipients,
             createdAt: time:utcToString(time:utcNow())
         };
-        
+
         // Insert notification
         _ = check mongodb:notificationCollection->insertOne(notification);
-        
+
         // Handle email notifications
         string[] emailRecipients = [];
         foreach string recipient in recipients {
@@ -1918,49 +1954,49 @@ service /api on new http:Listener(8080) {
             map<json> settingsFilter = {
                 "username": recipient
             };
-            
+
             record {}|() settingsRecord = check mongodb:notificationSettingsCollection->findOne(settingsFilter);
-            
+
             if settingsRecord is record {} {
                 json settingsJson = settingsRecord.toJson();
                 NotificationSettings settings = check settingsJson.cloneWithType(NotificationSettings);
-                
+
                 if settings.email_notifications {
                     emailRecipients.push(recipient);
                 }
             }
         }
-        
+
         if emailRecipients.length() > 0 {
             // Update meeting object for email notification
             meeting.directTimeSlot = timeSlot;
             meeting.status = "confirmed";
-            
+
             // Collect email addresses
             map<string> participantEmails = check collectParticipantEmails(emailRecipients);
-            
+
             // Send email notifications
             error? emailResult = sendEmailNotifications(notification, meeting, participantEmails);
-            
+
             if emailResult is error {
                 log:printError("Failed to send email notifications for confirmation", emailResult);
                 // Continue execution even if email sending fails
             }
         }
-        
+
         // Clean up the temporary suggestion if it exists
         map<json> suggestedTimeFilter = {
             "meetingId": meetingId
         };
         _ = check mongodb:temporarySuggestionsCollection->deleteOne(suggestedTimeFilter);
-        
+
         return {
             "status": "success",
             "message": "Meeting time confirmed successfully",
             "timeSlot": timeSlot.toJson()
         };
     }
-    
+
     // Updated endpoint to get meetings with cookie authentication
     resource function get meetings(http:Request req) returns Meeting[]|ErrorResponse|error {
         // Extract username from cookie
@@ -1971,17 +2007,17 @@ service /api on new http:Listener(8080) {
                 statusCode: 401
             };
         }
-        
+
         Meeting[] meetings = [];
         map<string> meetingIds = {}; // To track already added meetings
-        
+
         // 1. Find meetings created by this user
         map<json> createdByFilter = {
             "createdBy": username
         };
-        
+
         stream<record {}, error?> createdMeetingCursor = check mongodb:meetingCollection->find(createdByFilter);
-        
+
         // Process the results for created meetings
         check from record {} meetingData in createdMeetingCursor
             do {
@@ -1992,7 +2028,7 @@ service /api on new http:Listener(8080) {
                 meetings.push(meeting);
                 meetingIds[meeting.id] = "added"; // Mark as added
             };
-        
+
         // 2. Find meetings where user is a participant
         map<json> participantFilter = {
             "participants": {
@@ -2001,15 +2037,15 @@ service /api on new http:Listener(8080) {
                 }
             }
         };
-        
+
         stream<record {}, error?> participantMeetingCursor = check mongodb:meetingCollection->find(participantFilter);
-        
+
         // Process the results for participant meetings
         check from record {} meetingData in participantMeetingCursor
             do {
                 json jsonData = meetingData.toJson();
                 Meeting meeting = check jsonData.cloneWithType(Meeting);
-                
+
                 // Skip if already added
                 if (meeting.createdBy != username && !meetingIds.hasKey(meeting.id)) {
                     // Mark as participant
@@ -2018,7 +2054,7 @@ service /api on new http:Listener(8080) {
                     meetingIds[meeting.id] = "added"; // Mark as added
                 }
             };
-        
+
         // 3. Find meetings where user is a host
         map<json> hostFilter = {
             "hosts": {
@@ -2027,15 +2063,15 @@ service /api on new http:Listener(8080) {
                 }
             }
         };
-        
+
         stream<record {}, error?> hostMeetingCursor = check mongodb:meetingCollection->find(hostFilter);
-        
+
         // Process the results for host meetings
         check from record {} meetingData in hostMeetingCursor
             do {
                 json jsonData = meetingData.toJson();
                 Meeting meeting = check jsonData.cloneWithType(Meeting);
-                
+
                 // Skip if already added
                 if (!meetingIds.hasKey(meeting.id)) {
                     // Mark as host
@@ -2044,10 +2080,10 @@ service /api on new http:Listener(8080) {
                     meetingIds[meeting.id] = "added"; // Mark as added
                 }
             };
-        
+
         return meetings;
     }
-    
+
     // Updated endpoint to get meeting details by ID with cookie authentication
     resource function get meetings/[string meetingId](http:Request req) returns Meeting|ErrorResponse|error {
         // Extract username from cookie
@@ -2058,26 +2094,26 @@ service /api on new http:Listener(8080) {
                 statusCode: 401
             };
         }
-        
+
         // Create a filter to find the meeting by ID
         map<json> filter = {
             "id": meetingId
         };
-        
+
         // Query the meeting without specifying the return type
         record {}|() rawMeeting = check mongodb:meetingCollection->findOne(filter);
-        
+
         if rawMeeting is () {
             return {
                 message: "Meeting not found",
                 statusCode: 404
             };
         }
-        
+
         // Convert the raw document to JSON then to Meeting type
         json jsonData = rawMeeting.toJson();
         Meeting meeting = check jsonData.cloneWithType(Meeting);
-        
+
         // Determine the user's role in this meeting
         if (meeting.createdBy == username) {
             // User created this meeting
@@ -2092,9 +2128,9 @@ service /api on new http:Listener(8080) {
                     }
                 }
             };
-            
+
             record {}|() hostCheck = check mongodb:meetingCollection->findOne(hostCheckFilter);
-            
+
             if (hostCheck is record {}) {
                 meeting["role"] = "host";
             } else {
@@ -2107,9 +2143,9 @@ service /api on new http:Listener(8080) {
                         }
                     }
                 };
-                
+
                 record {}|() participantCheck = check mongodb:meetingCollection->findOne(participantCheckFilter);
-                
+
                 if (participantCheck is record {}) {
                     meeting["role"] = "participant";
                 } else {
@@ -2121,25 +2157,25 @@ service /api on new http:Listener(8080) {
                 }
             }
         }
-        
+
         // Get only the current user's availability data for this meeting
         map<json> userAvailFilter = {
             "meetingId": meetingId,
             "username": username
         };
-        
+
         record {}|() userAvailData = check mongodb:availabilityCollection->findOne(userAvailFilter);
-        
+
         // Add user's availability if it exists
         if userAvailData is record {} {
             json availJson = userAvailData.toJson();
             Availability userAvail = check availJson.cloneWithType(Availability);
             meeting["userAvailability"] = userAvail;
         }
-        
+
         return meeting;
     }
-    
+
     // Updated endpoint to edit a meeting by ID with proper authorization control
     resource function put meetings/[string meetingId](http:Request req) returns Meeting|error|ErrorResponse {
         // Extract username from cookie
@@ -2194,7 +2230,7 @@ service /api on new http:Listener(8080) {
                     }
                 }
             }
-            
+
             if (isHost) {
                 userRole = "host";
             } else {
@@ -2221,25 +2257,25 @@ service /api on new http:Listener(8080) {
                 updatedMeeting.title = titleValue;
                 updateOperations["title"] = titleValue;
             }
-            
+
             if (updatePayload.hasKey("location")) {
                 string locationValue = (updatePayload["location"] ?: "").toString();
                 updatedMeeting.location = locationValue;
                 updateOperations["location"] = locationValue;
             }
-            
+
             if (updatePayload.hasKey("description")) {
                 string descriptionValue = (updatePayload["description"] ?: "").toString();
                 updatedMeeting.description = descriptionValue;
                 updateOperations["description"] = descriptionValue;
             }
-            
+
             if (updatePayload.hasKey("repeat")) {
                 string repeatValue = (updatePayload["repeat"] ?: "").toString();
                 updatedMeeting.repeat = repeatValue;
                 updateOperations["repeat"] = repeatValue;
             }
-            
+
             // Handle meeting type specific fields
             if (existingMeeting.meetingType == "direct" && updatePayload.hasKey("directTimeSlot")) {
                 json timeSlotJson = updatePayload["directTimeSlot"] ?: {};
@@ -2263,126 +2299,126 @@ service /api on new http:Listener(8080) {
             if (updatePayload.hasKey("addParticipants")) {
                 json[] newParticipantIds = [];
                 json addParticipantsValue = updatePayload["addParticipants"];
-                
+
                 if addParticipantsValue is json[] {
                     newParticipantIds = addParticipantsValue;
                 }
-                
+
                 string[] participantIdList = [];
                 foreach json id in newParticipantIds {
                     if id is string {
                         participantIdList.push(id);
                     }
                 }
-                
+
                 // Process and add new participants
                 if participantIdList.length() > 0 {
                     MeetingParticipant[] newParticipants = check processParticipants(username, participantIdList);
-                    
+
                     // Add only participants that aren't in the meeting already
                     MeetingParticipant[] currentParticipants = existingMeeting?.participants ?: [];
                     foreach var newParticipant in newParticipants {
                         boolean alreadyExists = false;
-                        
+
                         foreach var existingParticipant in currentParticipants {
                             if (existingParticipant.username == newParticipant.username) {
                                 alreadyExists = true;
                                 break;
                             }
                         }
-                        
+
                         if (!alreadyExists) {
                             currentParticipants.push(newParticipant);
                         }
                     }
-                    
+
                     // Update the participants list
                     json participantsJson = check currentParticipants.cloneWithType(json);
                     updateOperations["participants"] = participantsJson;
                     updatedMeeting.participants = currentParticipants;
                 }
             }
-            
+
             // Remove participants
             if (updatePayload.hasKey("removeParticipants")) {
                 json[] removeUsernames = [];
                 json removeParticipantsValue = updatePayload["removeParticipants"];
-                
+
                 if removeParticipantsValue is json[] {
                     removeUsernames = removeParticipantsValue;
                 }
-                
+
                 string[] usernameList = [];
                 foreach json usernameValue in removeUsernames {
                     if usernameValue is string {
                         usernameList.push(usernameValue);
                     }
                 }
-                
+
                 // Remove specified participants
                 if usernameList.length() > 0 {
                     MeetingParticipant[] currentParticipants = existingMeeting?.participants ?: [];
                     MeetingParticipant[] updatedParticipants = [];
-                    
+
                     foreach var participant in currentParticipants {
                         boolean shouldRemove = false;
-                        
+
                         foreach string usernameToRemove in usernameList {
                             if (participant.username == usernameToRemove) {
                                 shouldRemove = true;
                                 break;
                             }
                         }
-                        
+
                         if (!shouldRemove) {
                             updatedParticipants.push(participant);
                         }
                     }
-                    
+
                     // Update the participants list
                     json participantsJson = check updatedParticipants.cloneWithType(json);
                     updateOperations["participants"] = participantsJson;
                     updatedMeeting.participants = updatedParticipants;
                 }
             }
-            
+
             // If this is a round_robin meeting, creators can manage hosts
             if (userRole == "creator" && existingMeeting.meetingType == "round_robin") {
                 // Add new hosts
                 if (updatePayload.hasKey("addHosts")) {
                     json[] newHostIds = [];
                     json addHostsValue = updatePayload["addHosts"];
-                    
+
                     if addHostsValue is json[] {
                         newHostIds = addHostsValue;
                     }
-                    
+
                     string[] hostIdList = [];
                     foreach json id in newHostIds {
                         if id is string {
                             hostIdList.push(id);
                         }
                     }
-                    
+
                     // Process and add new hosts
                     if hostIdList.length() > 0 {
                         MeetingParticipant[] newHosts = check processHosts(username, hostIdList);
-                        
+
                         // Add only hosts that aren't in the meeting already
                         MeetingParticipant[] currentHosts = existingMeeting?.hosts ?: [];
                         foreach var newHost in newHosts {
                             boolean alreadyExists = false;
-                            
+
                             foreach var existingHost in currentHosts {
                                 if (existingHost.username == newHost.username) {
                                     alreadyExists = true;
                                     break;
                                 }
                             }
-                            
+
                             if (!alreadyExists) {
                                 currentHosts.push(newHost);
-                                
+
                                 // Also create meeting assignment for the new host
                                 MeetingAssignment hostAssignment = {
                                     id: uuid:createType1AsString(),
@@ -2393,45 +2429,45 @@ service /api on new http:Listener(8080) {
                                 _ = check mongodb:meetinguserCollection->insertOne(hostAssignment);
                             }
                         }
-                        
+
                         // Update the hosts list
                         json hostsJson = check currentHosts.cloneWithType(json);
                         updateOperations["hosts"] = hostsJson;
                         updatedMeeting.hosts = currentHosts;
                     }
                 }
-                
+
                 // Remove hosts
                 if (updatePayload.hasKey("removeHosts")) {
                     json[] removeUsernames = [];
                     json removeHostsValue = updatePayload["removeHosts"];
-                    
+
                     if removeHostsValue is json[] {
                         removeUsernames = removeHostsValue;
                     }
-                    
+
                     string[] usernameList = [];
                     foreach json usernameValue in removeUsernames {
                         if usernameValue is string {
                             usernameList.push(usernameValue);
                         }
                     }
-                    
+
                     // Remove specified hosts
                     if usernameList.length() > 0 {
                         MeetingParticipant[] currentHosts = existingMeeting?.hosts ?: [];
                         MeetingParticipant[] updatedHosts = [];
-                        
+
                         foreach var host in currentHosts {
                             boolean shouldRemove = false;
-                            
+
                             foreach string usernameToRemove in usernameList {
                                 if (host.username == usernameToRemove) {
                                     shouldRemove = true;
                                     break;
                                 }
                             }
-                            
+
                             if (!shouldRemove) {
                                 updatedHosts.push(host);
                             } else {
@@ -2443,7 +2479,7 @@ service /api on new http:Listener(8080) {
                                 _ = check mongodb:meetinguserCollection->deleteOne(assignmentFilter);
                             }
                         }
-                        
+
                         // Update the hosts list
                         json hostsJson = check updatedHosts.cloneWithType(json);
                         updateOperations["hosts"] = hostsJson;
@@ -2457,10 +2493,10 @@ service /api on new http:Listener(8080) {
         if (updatePayload.hasKey("timeSlots") && (userRole == "creator" || userRole == "host")) {
             json timeSlotsJson = updatePayload["timeSlots"];
             TimeSlot[] updatedTimeSlots = [];
-            
+
             if timeSlotsJson is json[] {
                 updatedTimeSlots = <TimeSlot[]>check timeSlotsJson.cloneWithType();
-                
+
                 // For direct meetings, creator can update time slot directly in the meeting document
                 if (existingMeeting.meetingType == "direct" && userRole == "creator") {
                     // Single time slot for direct meetings
@@ -2470,15 +2506,15 @@ service /api on new http:Listener(8080) {
                     }
                 } else if (existingMeeting.meetingType == "group" || existingMeeting.meetingType == "round_robin") {
                     // For group and round robin meetings, time slots are stored in availability collection
-                    
+
                     // Check if user already has availability entries
                     map<json> availFilter = {
                         "username": username,
                         "meetingId": meetingId
                     };
-                    
+
                     record {}|() existingAvailability = check mongodb:availabilityCollection->findOne(availFilter);
-                    
+
                     if (existingAvailability is ()) {
                         // Create new availability record
                         Availability newAvailability = {
@@ -2593,7 +2629,7 @@ service /api on new http:Listener(8080) {
         // Check if user is creator
         if meeting.createdBy == username {
             hasPermission = true;
-        } 
+        }
         // Check if user is host
         else if meeting?.hosts is MeetingParticipant[] {
             foreach MeetingParticipant host in meeting?.hosts ?: [] {
@@ -2690,7 +2726,7 @@ service /api on new http:Listener(8080) {
         // Check if user is creator
         if meeting.createdBy == username {
             hasPermission = true;
-        } 
+        }
         // Check if user is host
         else if meeting?.hosts is MeetingParticipant[] {
             foreach MeetingParticipant host in meeting?.hosts ?: [] {
