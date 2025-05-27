@@ -5,7 +5,17 @@ import ballerina/url;
 import ballerina/uuid;
 import mongodb_atlas_app.mongodb;
 
-service /api on new http:Listener(8080) {
+@http:ServiceConfig {
+    cors: {
+        allowOrigins: ["http://localhost:3000"],
+        allowCredentials: true,
+        allowHeaders: ["content-type", "authorization"],
+        allowMethods: ["POST", "GET", "OPTIONS", "PUT", "DELETE"],
+        maxAge: 84900
+    }
+}
+
+service /api on new http:Listener(8083) {
 
     resource function post auth/signup(http:Caller caller, http:Request req) returns error? {
         // Parse the JSON payload from the request body

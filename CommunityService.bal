@@ -2,7 +2,17 @@ import ballerina/http;
 import ballerina/uuid;
 import mongodb_atlas_app.mongodb;
 
-service /api on new http:Listener(8080) {
+@http:ServiceConfig {
+    cors: {
+        allowOrigins: ["http://localhost:3000"],
+        allowCredentials: true,
+        allowHeaders: ["content-type", "authorization"],
+        allowMethods: ["POST", "GET", "OPTIONS", "PUT", "DELETE"],
+        maxAge: 84900
+    }
+}
+
+service /api on new http:Listener(8082) {
     resource function post groups(http:Request req) returns Group|ErrorResponse|error {
         // Extract username from cookie
         string? username = check validateAndGetUsernameFromCookie(req);
