@@ -10,7 +10,7 @@ import ballerina/lang.value;
 
 
 
-// Type definition for WebSocket message
+// Type definition for webSocket message
 type WSMessage record {|
     string _type;
     string roomId?;
