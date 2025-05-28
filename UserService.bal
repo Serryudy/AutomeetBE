@@ -257,6 +257,75 @@ service /api/users on ln {
         
         return user;
     }
+    // serch users based on username
+    resource function get search(http:Request req) returns User[]|ErrorResponse|error {
+        // Extract username from cookie for authentication
+        string? username = check validateAndGetUsernameFromCookie(req);
+        if username is () {
+            return {
+                message: "Unauthorized: Invalid or missing authentication token",
+                statusCode: 401
+            };
+        }
 
+        // Get query parameter
+        string? searchQuery = req.getQueryParamValue("q");
+        if searchQuery is () || searchQuery.trim().length() == 0 {
+            return {
+                message: "Search query is required",
+                statusCode: 400
+            };
+        }
+
+        // Create regex filter for case-insensitive partial matches
+        map<json> filter = {
+            "username": {
+                "$regex": searchQuery,
+                "$options": "i"  // case-insensitive
+            }
+        };
+
+        // Find matching users
+        stream<record {}, error?> userCursor = check mongodb:userCollection->find(filter);
+        User[] users = [];
+
+        // Process results
+        check from record {} userData in userCursor
+            do {
+                json userJson = userData.toJson();
+                User user = check userJson.cloneWithType(User);
+                
+                // Remove sensitive information
+                user.password = "";
+                user.refresh_token = "";
+                user.email_refresh_token = "";
+                
+                // Only include basic profile information
+                User limitedUser = {
+                    username: user.username,
+                    name: user.name,
+                    password: "", // Required field but set empty
+                    profile_pic: user.profile_pic,
+                    bio: user.bio,
+                    industry: user.industry,
+                    company: user.company,
+                    is_available: user.is_available,
+                    calendar_connected: user.calendar_connected,
+                    isadmin: false,
+                    role: "",
+                    phone_number: "",
+                    googleid: "",
+                    mobile_no: "",
+                    time_zone: "",
+                    social_media: "",
+                    refresh_token: "",
+                    email_refresh_token: ""
+                };
+                
+                users.push(limitedUser);
+            };
+
+        return users;
+    }
     
 }
