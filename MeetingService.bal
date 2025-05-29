@@ -7,8 +7,8 @@ import ballerina/time;
 import ballerina/uuid;
 
 // Google OAuth config - add your client values in production
-configurable string googleClientId = "q80a9la618pq41b7nnua3gigv29e0f46.apps.googleusercontent.com";
-configurable string googleClientSecret = "686bY0GTXkbzkohKIvOAoghKZ26l";
+configurable string googleClientId = "751259024059-q80a9la618pq41b7nnua3gigv29e0f46.apps.googleusercontent.com";
+configurable string googleClientSecret = "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";
 configurable string googleRedirectUri = "http://localhost:8080/api/auth/google/callback";
 configurable string googleCalendarRedirectUri = "http://localhost:8080/api/auth/google/calendar/callback";
 configurable string frontendBaseUrl = "http://localhost:3000";
