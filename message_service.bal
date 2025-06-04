@@ -55,15 +55,24 @@ type Attachment record {|
     int size;
 |};
 
+type ChatRoomResponse record {|
+    string id;
+    string[] participants;
+    boolean isActive;
+    string createdAt;
+    string? roomName;
+|};
+
+
 // Store active WebSocket connections
 map<websocket:Caller> connections = {};
-map<string[]> userRooms = {}; // Map of connectionId -> array of roomIds
-map<string> connectionUsers = {}; // Map of connectionId -> userId
+map<string[]> userRooms = {}; 
+map<string> connectionUsers = {};
 
 //JWT validation configurations
 configurable string jwtIssuer = "automeet";
 configurable string jwtAudience = "automeet-app";
-configurable string jwtSigningKey = "dummy"; // Should be securely stored
+configurable string jwtSigningKey = "dummy";
 
 // Create the WebSocket listener
 listener websocket:Listener chatListener = new(9090);
@@ -281,7 +290,7 @@ service class ChatSocketService {
         log:printError(string `Error in WebSocket connection ${connectionId}`, err);
     }
 
-    // Handle room creation
+    // Handle new room creation
     function handleCreateRoom(websocket:Caller caller, WSMessage message) returns error? {
         string[]? participantsList = message.participants;
         
@@ -460,7 +469,7 @@ service class ChatSocketService {
         }
     }
 
-    // Handle chat message
+    // Handle chat message (send new message)
     function handleChatMessage(websocket:Caller caller, string connectionId, WSMessage message) returns error? {
         if message.content is () || message.roomId is () || message.roomId == "" {
             check caller->writeMessage({
@@ -721,16 +730,6 @@ type ApiResponse record {|
     json data?;
 |};
 
-type ChatRoomResponse record {|
-    string id;
-    string[] participants;
-    boolean isActive;
-    string createdAt;
-    string? roomName;
-|};
-
-
-
 // HTTP service for chat resources
 @http:ServiceConfig {
     cors: {
@@ -794,6 +793,8 @@ service /api/chat on ln {
         };
     }
     
+
+    // Fetch messages for a specific room
     resource function get rooms/[string roomId]/messages(
     @http:Header {name: "Cookie"} string? cookieHeader,
     int _limit = 50,
@@ -895,6 +896,8 @@ service /api/chat on ln {
     };
 }
 
+
+    // Fetch chat room by ID
     resource function get rooms/[string roomId](
         @http:Header {name: "Cookie"} string? cookieHeader
     ) returns ApiResponse|error {

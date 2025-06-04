@@ -445,6 +445,10 @@ service /api on ln {
         };
     }
 
+  
+  
+  
+  
     //endpoint to fetch notifications
     resource function get notifications(http:Request req) returns Notification[]|http:Response|error {
         // Extract username from cookie
@@ -618,6 +622,10 @@ service /api on ln {
             "notificationId": notificationId
         };
     }
+
+
+
+    
 
     // Updated endpoint to submit availability with cookie authentication
     resource function post availability(http:Request req) returns Availability|ErrorResponse|error {
