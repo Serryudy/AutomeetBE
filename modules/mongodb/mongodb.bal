@@ -33,6 +33,7 @@ public mongodb:Collection transcriptCollection = getCollectionRef("transcripts")
 public mongodb:Collection contentCollection = getCollectionRef("content");
 public mongodb:Collection analyticsCollection = getCollectionRef("analytics");
 public mongodb:Collection noteCollection = getCollectionRef("notes");
+public mongodb:Collection availabilityNotificationStatusCollection = getCollectionRef("availability_notification_status");
 // Initialize MongoDB client - handles the error internally
 function initMongoDbClient() returns mongodb:Client {
     mongodb:Client|error dbclient = new ({

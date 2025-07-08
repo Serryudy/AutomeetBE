@@ -4,7 +4,6 @@ import ballerina/jwt;
 import ballerina/time;
 import ballerina/email;
 import ballerina/regex;
-import ballerina/io;
 import ballerina/uuid;
 import mongodb_atlas_app.mongodb;
 
@@ -116,79 +115,182 @@ public function checkAndNotifyParticipantsForRoundRobin(Meeting meeting) returns
         return;
     }
 
-// Function to check if deadline has passed and calculate best time slot
-public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? {
+public function sendAvailabilityRequestNotification(Meeting meeting) returns error? {
     if (meeting.meetingType != "group" && meeting.meetingType != "round_robin") {
-        return; // Only applies to group and round robin meetings
+        return;
     }
-    
-    // Get the creator's availability to find the deadline
-    map<json> creatorAvailFilter = {
-        "username": meeting.createdBy,
-        "meetingId": meeting.id
+
+    // Get all participants
+    string[] recipients = [];
+    foreach MeetingParticipant participant in meeting?.participants ?: [] {
+        recipients.push(participant.username);
+    }
+
+    if (recipients.length() == 0) {
+        return;
+    }
+
+    // Create notification for participants
+    Notification notification = {
+        id: uuid:createType1AsString(),
+        title: meeting.title + " - Availability Request",
+        message: string `Please submit your availability for the meeting "${meeting.title}".`,
+        notificationType: "availability_request",
+        meetingId: meeting.id,
+        toWhom: recipients,
+        createdAt: time:utcToString(time:utcNow())
     };
-    
-    record {}|() creatorAvail = check mongodb:availabilityCollection->findOne(creatorAvailFilter);
-    
-    if (creatorAvail is ()) {
-        return; // No deadline info available
-    }
-    
-    json creatorAvailJson = (<record {}>creatorAvail).toJson();
-    Availability creatorAvailability = check creatorAvailJson.cloneWithType(Availability);
-    
-    // Get the earliest time slot as deadline
-    TimeSlot[] creatorTimeSlots = creatorAvailability.timeSlots;
-    if (creatorTimeSlots.length() == 0) {
-        return; // No time slots in creator's availability
-    }
-    
-    // Find the earliest time slot
-    string? earliestTime = ();
-    foreach TimeSlot slot in creatorTimeSlots {
-        if (earliestTime is () || slot.startTime < earliestTime) {
-            earliestTime = slot.startTime;
+
+    // Insert notification
+    _ = check mongodb:notificationCollection->insertOne(notification);
+
+    // Handle email notifications
+    foreach string recipient in recipients {
+        map<json> settingsFilter = {
+            "username": recipient
+        };
+        
+        record {}|() settingsRecord = check mongodb:notificationSettingsCollection->findOne(settingsFilter);
+        
+        // Fix the email notification check
+        if (settingsRecord is record {}) {
+            json settingsJson = settingsRecord.toJson();
+            NotificationSettings settings = check settingsJson.cloneWithType(NotificationSettings);
+            
+            if settings.email_notifications {
+                map<string> recipientEmail = check collectParticipantEmails([recipient]);
+                error? emailResult = sendEmailNotifications(notification, meeting, recipientEmail);
+                
+                if (emailResult is error) {
+                    log:printError("Failed to send availability request email", emailResult);
+                }
+            }
         }
     }
-    
-    if (earliestTime is ()) {
-        io:println("No valid time from earliest time empty");
-        return; // No valid deadline
-    }
-    
-    // Check if current time is past the deadline
-    time:Utc currentTime = time:utcNow();
-    string currentTimeStr = time:utcToString(currentTime);
-    boolean deadlinePassed = currentTimeStr > <string>earliestTime;
-    
-    if (deadlinePassed) {
-        // If deadline has passed, notify creator to reschedule
-        _ = check notifyCreatorToReschedule(meeting, <string>earliestTime);
+}
+
+// Add to MeetingService.bal or Support.bal
+public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? {
+    if (meeting.meetingType != "group" && meeting.meetingType != "round_robin") {
         return;
     }
     
-    // Determine the best time slot based on matching availabilities from both collections
-    TimeSlot? bestTimeSlot = check findBestTimeSlot(meeting);
+    // Get all availability entries for this meeting
+    map<json> availFilter = {
+        "meetingId": meeting.id
+    };
     
-    if (bestTimeSlot is TimeSlot) {
-        map<json> suggestedTimeDoc = {
-            "meetingId": meeting.id,
-            "suggestedTimeSlot": check bestTimeSlot.cloneWithType(json),
-            "isBestTimeSlot": true,
-            "createdAt": time:utcToString(time:utcNow())
+    stream<record {}, error?> availCursor = check mongodb:availabilityCollection->find(availFilter);
+    TimeSlot? latestTimeSlot = ();
+    
+    // Process availabilities to find the latest time slot
+    check from record {} availData in availCursor
+        do {
+            json availJson = availData.toJson();
+            Availability availability = check availJson.cloneWithType(Availability);
+            
+            foreach TimeSlot slot in availability.timeSlots {
+                if (latestTimeSlot is () || slot.endTime > latestTimeSlot.endTime) {
+                    latestTimeSlot = slot;
+                }
+            }
         };
-        mongodb:Update suggestedTimeUpdate = {
-            "set": suggestedTimeDoc
-        };
-
-        _ = check mongodb:temporarySuggestionsCollection->updateOne(
-            {"meetingId": meeting.id}, 
-            suggestedTimeUpdate,
-            {"upsert": true}
-        );
+    
+    if (latestTimeSlot is ()) {
+        return;
     }
+
+    // Get notification recipients (creator and hosts only)
+    string[] recipients = [meeting.createdBy];
     
+    // Add hosts for round robin meetings
+    if (meeting.meetingType == "round_robin" && meeting?.hosts is MeetingParticipant[]) {
+        foreach MeetingParticipant host in meeting?.hosts ?: [] {
+            if (host.username != meeting.createdBy) {  // Avoid duplicates
+                recipients.push(host.username);
+            }
+        }
+    }
+
+    // Create and send notification
+    Notification notification = {
+        id: uuid:createType1AsString(),
+        title: meeting.title + " - Availability Update",
+        message: string `New participant availability submission received for "${meeting.title}". ` + 
+                string `Latest submission deadline is ${latestTimeSlot.endTime}.`,
+        notificationType: "availability_update",
+        meetingId: meeting.id,
+        toWhom: recipients,
+        createdAt: time:utcToString(time:utcNow())
+    };
+
+    // Check notification status
+    map<json> notificationFilter = {
+        "meetingId": meeting.id
+    };
+    
+    record {}|() notificationStatus = check mongodb:availabilityNotificationStatusCollection->findOne(notificationFilter);
+    string currentDate = time:utcToString(time:utcNow()).substring(0, 10);
+    
+    if (notificationStatus is record {}) {
+        json statusJson = notificationStatus.toJson();
+        AvailabilityNotificationStatus status = check statusJson.cloneWithType(AvailabilityNotificationStatus);
+        
+        if (status.lastNotificationDate == currentDate) {
+            mongodb:Update updateOperation = {
+                "set": {
+                    "submissionCount": status.submissionCount + 1
+                }
+            };
+            _ = check mongodb:availabilityNotificationStatusCollection->updateOne(notificationFilter, updateOperation);
+            return;
+        }
+    }
+
+    // Update notification status
+    AvailabilityNotificationStatus newStatus = {
+        meetingId: meeting.id,
+        lastNotificationDate: currentDate,
+        submissionCount: 1
+    };
+
+    mongodb:Update statusUpdate = {
+        "set": <map<json>> newStatus.toJson()
+    };
+    
+    _ = check mongodb:availabilityNotificationStatusCollection->updateOne(
+        notificationFilter,
+        statusUpdate,
+        {"upsert": true}
+    );
+
+    // Insert notification if first submission of the day
+    if (notificationStatus is () || (<record {}>notificationStatus).toJson().lastNotificationDate != currentDate) {
+        _ = check mongodb:notificationCollection->insertOne(notification);
+        
+        // Handle email notifications for recipients
+        foreach string recipient in recipients {
+            map<json> settingsFilter = {
+                "username": recipient
+            };
+            
+            record {}|() settingsRecord = check mongodb:notificationSettingsCollection->findOne(settingsFilter);
+            
+            if (settingsRecord is record {}) {
+                NotificationSettings|error settings = settingsRecord.toJson().cloneWithType(NotificationSettings);
+                if settings is NotificationSettings && settings.email_notifications {
+                map<string> recipientEmail = check collectParticipantEmails([recipient]);
+                error? emailResult = sendEmailNotifications(notification, meeting, recipientEmail);
+                
+                if (emailResult is error) {
+                    log:printError("Failed to send availability update email", emailResult);
+                }
+            }
+        }
+    }
+
     return;
+}
 }
 
 public function findBestTimeSlot(Meeting meeting) returns TimeSlot?|error {
@@ -570,15 +672,13 @@ public function processParticipants(string creatorUsername, string[] participant
 
 
 public function sendEmailNotifications(Notification notification, Meeting meeting, map<string> participantEmails) returns error? {
-    // Email configuration
     EmailConfig emailConfig = {
         host: "smtp.gmail.com",
         username: "somapalagalagedara@gmail.com",
         password: "wzhd plxq isxl nddc",
-        frontendUrl: "https://localhost:3000" // Update with actual frontend URL
+        frontendUrl: "http://localhost:3000"
     };
     
-    // Create SMTP client
     email:SmtpClient|error smtpClient = new (emailConfig.host, emailConfig.username, emailConfig.password);
     
     if smtpClient is error {
@@ -586,21 +686,41 @@ public function sendEmailNotifications(Notification notification, Meeting meetin
         return smtpClient;
     }
     
-    // Get email template based on notification type
-    EmailTemplate template = getEmailTemplate(notification.notificationType, meeting.title);
-    
-    // Create a deep link to the meeting
-    string meetingLink = emailConfig.frontendUrl + "/meetingsdetails/" + meeting.id;
-    
-    // Send emails to all recipients
     foreach string username in notification.toWhom {
-        // Skip if email doesn't exist for this user
         if !participantEmails.hasKey(username) {
             log:printWarn("No email address found for user: " + username);
             continue;
         }
         
         string recipientEmail = participantEmails[username] ?: "";
+        
+        // Check if user exists in user collection
+        map<json> userFilter = {
+            "username": username
+        };
+        
+        record {}|() userRecord = check mongodb:userCollection->findOne(userFilter);
+        string meetingLink;
+        
+        if userRecord is () {
+            // User not in system - generate external links based on notification type
+            if notification.notificationType == "availability_request" {
+                // Generate a UUID for external user
+                string externalUserId = uuid:createType1AsString();
+                meetingLink = string `${emailConfig.frontendUrl}/exavailability/${externalUserId}/${meeting.id}`;
+            } else if notification.notificationType == "confirmation" || 
+                      notification.notificationType == "cancellation" {
+                meetingLink = string `${emailConfig.frontendUrl}/exmeetingdetails/${meeting.id}`;
+            } else {
+                meetingLink = string `${emailConfig.frontendUrl}/exmeetingdetails/${meeting.id}`;
+            }
+        } else {
+            // Regular user - use normal meeting link
+            meetingLink = string `${emailConfig.frontendUrl}/meetingdetails/${meeting.id}`;
+        }
+        
+        // Get email template and customize it
+        EmailTemplate template = getEmailTemplate(notification.notificationType, meeting.title);
         
         // Replace placeholders in template
         string personalizedBody = regex:replace(
@@ -612,18 +732,23 @@ public function sendEmailNotifications(Notification notification, Meeting meetin
             "\\{meeting_link\\}", 
             meetingLink
         );
-            
-        // Add meeting details to the email
+        
+        // Add meeting details
         personalizedBody = personalizedBody + "\n\nMeeting Details:\n" +
             "Location: " + meeting.location + "\n" +
             "Description: " + meeting.description;
-            
-        // Add appropriate meeting time information
+        
+        // Add time information based on meeting type
         if meeting.meetingType == "direct" && meeting?.directTimeSlot is TimeSlot {
             TimeSlot timeSlot = <TimeSlot>meeting?.directTimeSlot;
             personalizedBody = personalizedBody + "\nTime: " + timeSlot.startTime + " to " + timeSlot.endTime;
         } else if meeting.meetingType == "group" || meeting.meetingType == "round_robin" {
-            personalizedBody = personalizedBody + "\nPlease mark your availability using the link above.";
+            if userRecord is () {
+                personalizedBody = personalizedBody + "\nPlease use the link above to submit your availability. " +
+                                 "No registration required.";
+            } else {
+                personalizedBody = personalizedBody + "\nPlease mark your availability using the link above.";
+            }
         }
         
         // Create email message
@@ -639,7 +764,6 @@ public function sendEmailNotifications(Notification notification, Meeting meetin
         
         if sendResult is error {
             log:printError("Failed to send email to " + recipientEmail, sendResult);
-            // Continue with other emails even if one fails
         } else {
             log:printInfo("Email sent successfully to " + recipientEmail);
         }
@@ -1053,4 +1177,8 @@ public function generateJwtToken(User user) returns string|error {
     }
     
     return token;
+}
+
+public function hasAuthorizationHeader(http:Request req) returns boolean {
+    return req.hasHeader("Authorization");
 }
