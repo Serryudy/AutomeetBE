@@ -6,7 +6,7 @@ import ballerina/log;
 import ballerina/time;
 import ballerina/uuid;
 
-// Google OAuth config - add your client values in production
+// Google OAuth config 
 configurable string googleClientId = "q80a9la618pq41b7nnua3gigv29e0f46.apps.googleusercontent.com";
 configurable string googleClientSecret = "686bY0GTXkbzkohKIvOAoghKZ26l";
 configurable string googleRedirectUri = "http://localhost:8080/api/auth/google/callback";
@@ -685,7 +685,7 @@ service /api on ln {
 
     
     // endpoint to get availability with cookie authentication
-
+             
     resource function get availability/[string meetingId](http:Request req) returns Availability[]|ErrorResponse|error {
         // Extract username from cookie
         string? username = check validateAndGetUsernameFromCookie(req);
