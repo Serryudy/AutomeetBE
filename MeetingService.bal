@@ -6,7 +6,7 @@ import ballerina/log;
 import ballerina/time;
 import ballerina/uuid;
 
-// Google OAuth config 
+// Google OAuth config - add your client values in production
 configurable string googleClientId = "q80a9la618pq41b7nnua3gigv29e0f46.apps.googleusercontent.com";
 configurable string googleClientSecret = "686bY0GTXkbzkohKIvOAoghKZ26l";
 configurable string googleRedirectUri = "http://localhost:8080/api/auth/google/callback";
@@ -76,7 +76,8 @@ service /api on ln {
             createdBy: username,
             repeat: payload.repeat,
             directTimeSlot: payload.directTimeSlot,
-            participants: participants
+            participants: participants,
+            deadlineNotificationSent: false
         };
 
         MeetingAssignment meetingAssignment = {
@@ -85,6 +86,7 @@ service /api on ln {
             meetingId: meetingId,
             isAdmin: true
         };
+        
 
         //Insert the meeting into MongoDB
         _ = check mongodb:meetingCollection->insertOne(meeting);
@@ -151,7 +153,8 @@ service /api on ln {
             createdBy: username,
             repeat: payload.repeat,
             groupDuration: payload.groupDuration,
-            participants: participants
+            participants: participants,
+            deadlineNotificationSent: false
         };
 
         MeetingAssignment meetingAssignment = {
@@ -240,7 +243,8 @@ service /api on ln {
             repeat: payload.repeat,
             roundRobinDuration: payload.roundRobinDuration,
             hosts: hosts,
-            participants: participants
+            participants: participants,
+            deadlineNotificationSent: false
         };
 
         // Create meeting assignments for the meeting creator
@@ -445,6 +449,10 @@ service /api on ln {
         };
     }
 
+  
+  
+  
+  
     //endpoint to fetch notifications
     resource function get notifications(http:Request req) returns Notification[]|http:Response|error {
         // Extract username from cookie
@@ -534,7 +542,7 @@ service /api on ln {
         };
     }
 
-    // Endpoint to mark a  single notification as read
+    // Endpoint to mark a single notification as read
     resource function put notifications/[string notificationId]/read(http:Request req) returns json|http:Response|error {
         // Extract username from cookie
         string? username = check validateAndGetUsernameFromCookie(req);
@@ -580,7 +588,7 @@ service /api on ln {
         };
     }
 
-    // Endpointto delete a single notification
+    // Endpoint to delete a single notification
     resource function delete notifications/[string notificationId](http:Request req) returns json|http:Response|error {
         // Extract username from cookie
         string? username = check validateAndGetUsernameFromCookie(req);
@@ -618,6 +626,10 @@ service /api on ln {
             "notificationId": notificationId
         };
     }
+
+
+
+    
 
     // Updated endpoint to submit availability with cookie authentication
     resource function post availability(http:Request req) returns Availability|ErrorResponse|error {
@@ -685,7 +697,7 @@ service /api on ln {
 
     
     // endpoint to get availability with cookie authentication
-             
+
     resource function get availability/[string meetingId](http:Request req) returns Availability[]|ErrorResponse|error {
         // Extract username from cookie
         string? username = check validateAndGetUsernameFromCookie(req);
