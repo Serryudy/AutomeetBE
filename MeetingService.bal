@@ -534,7 +534,7 @@ service /api on ln {
         };
     }
 
-    // Endpoint to mark a single notification as read
+    // Endpoint to mark a  single notification as read
     resource function put notifications/[string notificationId]/read(http:Request req) returns json|http:Response|error {
         // Extract username from cookie
         string? username = check validateAndGetUsernameFromCookie(req);
@@ -580,7 +580,7 @@ service /api on ln {
         };
     }
 
-    // Endpoint to delete a single notification
+    // Endpointto delete a single notification
     resource function delete notifications/[string notificationId](http:Request req) returns json|http:Response|error {
         // Extract username from cookie
         string? username = check validateAndGetUsernameFromCookie(req);
