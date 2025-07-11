@@ -240,7 +240,7 @@ service /api/auth on ln {
 
             // Set the refresh token in a separate cookie with longer expiration
             http:Cookie refreshCookie = new("refresh_token", refreshToken, 
-                path = "/api/refresh", // Restrict to refresh endpoint only
+                path = "/api/auth/refresh", // Restrict to refresh endpoint only
                 httpOnly = true, 
                 secure = true,
                 maxAge = 2592000 // 30 days
@@ -349,7 +349,7 @@ service /api/auth on ln {
         
         // Set the new refresh token in a separate cookie with longer expiration
         http:Cookie refreshCookie = new("refresh_token", newRefreshToken, 
-            path = "/api/refresh", // Restrict to refresh endpoint only
+            path = "/api/auth/refresh", // Restrict to refresh endpoint only
             httpOnly = true, 
             secure = true,
             maxAge = 2592000 // 30 days
