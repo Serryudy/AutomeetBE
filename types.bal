@@ -324,3 +324,12 @@ public type AvailabilityNotificationStatus record {
 public type ExternalContentRequest record {
     string content;
 };
+
+
+public type ExternalUserMapping record {
+    string id;
+    string externalUserId;
+    string email;
+    string meetingId;
+    string createdAt;
+};
