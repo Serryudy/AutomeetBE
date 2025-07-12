@@ -76,7 +76,8 @@ service /api on ln {
             createdBy: username,
             repeat: payload.repeat,
             directTimeSlot: payload.directTimeSlot,
-            participants: participants
+            participants: participants,
+            deadlineNotificationSent: false
         };
 
         MeetingAssignment meetingAssignment = {
@@ -85,6 +86,7 @@ service /api on ln {
             meetingId: meetingId,
             isAdmin: true
         };
+        
 
         //Insert the meeting into MongoDB
         _ = check mongodb:meetingCollection->insertOne(meeting);
@@ -151,7 +153,8 @@ service /api on ln {
             createdBy: username,
             repeat: payload.repeat,
             groupDuration: payload.groupDuration,
-            participants: participants
+            participants: participants,
+            deadlineNotificationSent: false
         };
 
         MeetingAssignment meetingAssignment = {
@@ -240,7 +243,8 @@ service /api on ln {
             repeat: payload.repeat,
             roundRobinDuration: payload.roundRobinDuration,
             hosts: hosts,
-            participants: participants
+            participants: participants,
+            deadlineNotificationSent: false
         };
 
         // Create meeting assignments for the meeting creator
