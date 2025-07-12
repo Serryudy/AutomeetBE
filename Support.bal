@@ -170,20 +170,23 @@ public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? {
             json meetingJson = meetingRecord.toJson();
             Meeting currentMeeting = check meetingJson.cloneWithType(Meeting);
 
-            // Check if notification has already been sent
-            boolean notificationSent = true;
-            if (currentMeeting.deadlineNotificationSent is boolean) {
-                notificationSent = currentMeeting.deadlineNotificationSent;
+            // Check if notification has already been sent using member access
+            boolean notificationSent = false;
+            if (currentMeeting.hasKey("deadlineNotificationSent")) {
+                anydata notificationValue = currentMeeting.get("deadlineNotificationSent");
+                if (notificationValue is boolean) {
+                    notificationSent = notificationValue;
+                }
             }
 
             if (!notificationSent) {
-
-                // Send notification for the first time
+                // Send notification for the first time             
                 _ = check notifyCreatorToReschedule(meeting, <string>earliestTime);
 
-                // Update the meeting record to mark notification as sent
+                // Update the meeting record to mark notification as sent             
                 map<json> updateDoc = {
-                    "deadlineNotificationSent": true
+                    "deadlineNotificationSent": true,
+                    "deadlineNotificationSentAt": time:utcToString(time:utcNow())
                 };
                 mongodb:Update meetingUpdate = {
                     "set": updateDoc
@@ -191,14 +194,16 @@ public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? {
 
                 _ = check mongodb:meetingCollection->updateOne(
                 {"id": meeting.id},
-                meetingUpdate
+                meetingUpdate,
+                {"upsert": true} // This ensures the document is created if it doesn't exist
                 );
             } else {
-                return ;
+                io:println("Notification already sent for meeting: " + meeting.id);
+                return;
             }
-
         } else {
-            return ;
+            io:println("Meeting record not found in database");
+            return;
         }
         return;
     }
