@@ -118,7 +118,7 @@ service /api/community on ln {
         return groups;
     }
 
-    // Updated endpoint to get contact users with cookie authentication
+    // get contact users with cookie authentication
     resource function get contact/users(http:Request req) returns User[]|ErrorResponse|error {
         // Extract username from cookie
         string? username = check validateAndGetUsernameFromCookie(req);
