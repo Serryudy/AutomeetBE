@@ -172,16 +172,13 @@ public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? {
 
             // Check if notification has already been sent using member access
             boolean notificationSent = true;
-            if (currentMeeting.hasKey("deadlineNotificationSent")) {
-                anydata notificationValue = currentMeeting.get("deadlineNotificationSent");
-                if (notificationValue is boolean) {
-                    notificationSent = notificationValue;
-                }
+            if (currentMeeting.deadlineNotificationSent is boolean) {
+                notificationSent = currentMeeting.deadlineNotificationSent;
             }
 
             if (!notificationSent) {
                 // Send notification for the first time             
-                _ = check notifyCreatorToReschedule(meeting, <string>earliestTime);
+                _ = check notifyCreatorToReschedule(meeting);
 
                 // Update the meeting record to mark notification as sent             
                 map<json> updateDoc = {
@@ -416,15 +413,15 @@ public function findBestTimeSlot(Meeting meeting) returns TimeSlot?|error {
 }
 
 // Helper function to notify the creator to reschedule
-public function notifyCreatorToReschedule(Meeting meeting, string deadline) returns error? {
+public function notifyCreatorToReschedule(Meeting meeting) returns error? {
     // Create notification for the creator
     string[] recipients = [meeting.createdBy];
 
     Notification notification = {
         id: uuid:createType1AsString(),
         title: meeting.title + " - Deadline Passed",
-        message: "The deadline for meeting \"" + meeting.title +
-                "\" has passed without sufficient availability data. Please reschedule the meeting.",
+        message: "The deadline for meeting " + meeting.title +
+                " has passed without sufficient availability data. Please reschedule the meeting.",
         notificationType: "cancellation", // Using cancellation type for visual distinction
         meetingId: meeting.id,
         toWhom: recipients,
