@@ -171,7 +171,7 @@ public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? {
             Meeting currentMeeting = check meetingJson.cloneWithType(Meeting);
 
             // Check if notification has already been sent using member access
-            boolean notificationSent = false;
+            boolean notificationSent = true;
             if (currentMeeting.hasKey("deadlineNotificationSent")) {
                 anydata notificationValue = currentMeeting.get("deadlineNotificationSent");
                 if (notificationValue is boolean) {
