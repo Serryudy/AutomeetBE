@@ -448,9 +448,6 @@ service /api on ln {
             "message": "Meeting canceled successfully"
         };
     }
-
-  
-  
   
   
     //endpoint to fetch notifications
