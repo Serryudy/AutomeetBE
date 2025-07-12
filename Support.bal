@@ -176,7 +176,7 @@ public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? {
                 notificationSent = currentMeeting.deadlineNotificationSent;
             }
 
-            if (notificationSent) {
+            if (!notificationSent) {
 
                 // Send notification for the first time
                 _ = check notifyCreatorToReschedule(meeting, <string>earliestTime);
