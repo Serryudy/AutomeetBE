@@ -333,3 +333,33 @@ public type ExternalUserMapping record {
     string meetingId;
     string createdAt;
 };
+
+public type AIReport record {
+    string id;
+    string meetingId;
+    string reportContent;
+    string generatedBy;
+    string createdAt;
+    string updatedAt;
+};
+
+public type HuggingFaceRequest record {
+    string inputs;
+    HuggingFaceParameters parameters?;
+    map<json> options?;
+};
+
+public type HuggingFaceParameters record {
+    int max_length?;
+    float temperature?;
+    boolean do_sample?;
+    float top_p?;
+    int num_return_sequences?;
+};
+
+public type OllamaRequest record {
+    string model;
+    string prompt;
+    boolean Stream?;
+    map<json> options?;
+};

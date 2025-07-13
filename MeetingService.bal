@@ -60,10 +60,12 @@ service /api on ln {
         // Generate a unique meeting ID
         string meetingId = uuid:createType1AsString();
 
-        // Process participants
-        MeetingParticipant[] participants = check processParticipants(
-                username,
-                payload.participantIds
+        // Process participants with email handling
+        MeetingParticipant[] participants = check processParticipantsWithEmails(
+            username,
+            payload.participantIds,
+            meetingId,
+            "direct"
         );
 
         // Create the meeting record
@@ -86,19 +88,16 @@ service /api on ln {
             isAdmin: true
         };
 
-        //Insert the meeting into MongoDB
+        // Insert the meeting into MongoDB
         _ = check mongodb:meetingCollection->insertOne(meeting);
         _ = check mongodb:meetinguserCollection->insertOne(meetingAssignment);
 
-        //Check if the meeting time is in the future
-        TimeSlot _ = payload.directTimeSlot;
-
-        // Create and insert notification
-        Notification notification = check createMeetingNotification(
-                meetingId,
-                meeting.title,
-                "direct",
-                participants
+        // Create and insert notification for registered participants only
+        Notification notification = check createMeetingNotificationWithMixedParticipants(
+            meetingId,
+            meeting.title,
+            "direct",
+            participants
         );
 
         // Add the creator to the notification recipients
@@ -135,10 +134,12 @@ service /api on ln {
         // Generate a unique meeting ID
         string meetingId = uuid:createType1AsString();
 
-        // Process participants
-        MeetingParticipant[] participants = check processParticipants(
-                username,
-                payload.participantIds
+        // Process participants with email handling
+        MeetingParticipant[] participants = check processParticipantsWithEmails(
+            username,
+            payload.participantIds,
+            meetingId,
+            "group"
         );
 
         // Create the meeting record - without time slots
@@ -175,12 +176,12 @@ service /api on ln {
 
         _ = check mongodb:availabilityCollection->insertOne(creatorAvailability);
 
-        // Create and insert notification
-        Notification notification = check createMeetingNotification(
-                meetingId,
-                meeting.title,
-                "group",
-                participants
+        // Create and insert notification for registered participants only
+        Notification notification = check createMeetingNotificationWithMixedParticipants(
+            meetingId,
+            meeting.title,
+            "group",
+            participants
         );
 
         // Add the creator to the notification recipients
@@ -219,14 +220,16 @@ service /api on ln {
 
         // Process hosts
         MeetingParticipant[] hosts = check processHosts(
-                username,
-                payload.hostIds
+            username,
+            payload.hostIds
         );
 
-        // Process participants
-        MeetingParticipant[] participants = check processParticipants(
-                username,
-                payload.participantIds
+        // Process participants with email handling
+        MeetingParticipant[] participants = check processParticipantsWithEmails(
+            username,
+            payload.participantIds,
+            meetingId,
+            "round_robin"
         );
 
         // Create the meeting record - without time slots
@@ -276,13 +279,13 @@ service /api on ln {
         // Insert the meeting into MongoDB
         _ = check mongodb:meetingCollection->insertOne(meeting);
 
-        // Create and insert notification
-        Notification notification = check createMeetingNotification(
-                meetingId,
-                meeting.title,
-                "round_robin",
-                participants,
-                hosts
+        // Create and insert notification for registered participants only
+        Notification notification = check createMeetingNotificationWithMixedParticipants(
+            meetingId,
+            meeting.title,
+            "round_robin",
+            participants,
+            hosts
         );
 
         // Add the creator to the notification recipients
