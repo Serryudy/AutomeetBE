@@ -102,6 +102,7 @@ public type Meeting record {
     string? roundRobinDuration?;
     MeetingParticipant[]? hosts?;
     MeetingParticipant[]? participants?;
+    boolean deadlineNotificationSent = false;
 };
 
 public type MeetingContent record {
