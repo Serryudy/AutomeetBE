@@ -60,10 +60,12 @@ service /api on ln {
         // Generate a unique meeting ID
         string meetingId = uuid:createType1AsString();
 
-        // Process participants
-        MeetingParticipant[] participants = check processParticipants(
-                username,
-                payload.participantIds
+        // Process participants with email handling
+        MeetingParticipant[] participants = check processParticipantsWithEmails(
+            username,
+            payload.participantIds,
+            meetingId,
+            "direct"
         );
 
         // Create the meeting record
@@ -88,19 +90,16 @@ service /api on ln {
         };
         
 
-        //Insert the meeting into MongoDB
+        // Insert the meeting into MongoDB
         _ = check mongodb:meetingCollection->insertOne(meeting);
         _ = check mongodb:meetinguserCollection->insertOne(meetingAssignment);
 
-        //Check if the meeting time is in the future
-        TimeSlot _ = payload.directTimeSlot;
-
-        // Create and insert notification
-        Notification notification = check createMeetingNotification(
-                meetingId,
-                meeting.title,
-                "direct",
-                participants
+        // Create and insert notification for registered participants only
+        Notification notification = check createMeetingNotificationWithMixedParticipants(
+            meetingId,
+            meeting.title,
+            "direct",
+            participants
         );
 
         // Add the creator to the notification recipients
@@ -137,10 +136,12 @@ service /api on ln {
         // Generate a unique meeting ID
         string meetingId = uuid:createType1AsString();
 
-        // Process participants
-        MeetingParticipant[] participants = check processParticipants(
-                username,
-                payload.participantIds
+        // Process participants with email handling
+        MeetingParticipant[] participants = check processParticipantsWithEmails(
+            username,
+            payload.participantIds,
+            meetingId,
+            "group"
         );
 
         // Create the meeting record - without time slots
@@ -178,12 +179,12 @@ service /api on ln {
 
         _ = check mongodb:availabilityCollection->insertOne(creatorAvailability);
 
-        // Create and insert notification
-        Notification notification = check createMeetingNotification(
-                meetingId,
-                meeting.title,
-                "group",
-                participants
+        // Create and insert notification for registered participants only
+        Notification notification = check createMeetingNotificationWithMixedParticipants(
+            meetingId,
+            meeting.title,
+            "group",
+            participants
         );
 
         // Add the creator to the notification recipients
@@ -222,14 +223,16 @@ service /api on ln {
 
         // Process hosts
         MeetingParticipant[] hosts = check processHosts(
-                username,
-                payload.hostIds
+            username,
+            payload.hostIds
         );
 
-        // Process participants
-        MeetingParticipant[] participants = check processParticipants(
-                username,
-                payload.participantIds
+        // Process participants with email handling
+        MeetingParticipant[] participants = check processParticipantsWithEmails(
+            username,
+            payload.participantIds,
+            meetingId,
+            "round_robin"
         );
 
         // Create the meeting record - without time slots
@@ -280,13 +283,13 @@ service /api on ln {
         // Insert the meeting into MongoDB
         _ = check mongodb:meetingCollection->insertOne(meeting);
 
-        // Create and insert notification
-        Notification notification = check createMeetingNotification(
-                meetingId,
-                meeting.title,
-                "round_robin",
-                participants,
-                hosts
+        // Create and insert notification for registered participants only
+        Notification notification = check createMeetingNotificationWithMixedParticipants(
+            meetingId,
+            meeting.title,
+            "round_robin",
+            participants,
+            hosts
         );
 
         // Add the creator to the notification recipients
@@ -699,15 +702,6 @@ service /api on ln {
     // endpoint to get availability with cookie authentication
 
     resource function get availability/[string meetingId](http:Request req) returns Availability[]|ErrorResponse|error {
-        // Extract username from cookie
-        string? username = check validateAndGetUsernameFromCookie(req);
-        if username is () {
-            return {
-                message: "Unauthorized: Invalid or missing authentication token",
-                statusCode: 401
-            };
-        }
-
         // Create a filter to find availabilities for this meeting
         map<json> filter = {
             "meetingId": meetingId
@@ -964,109 +958,68 @@ service /api on ln {
 
     // meeting content
     resource function post meetings/[string meetingId]/content(http:Request req) returns MeetingContent|ErrorResponse|error {
-        // Extract username from cookie
-        string? username = check validateAndGetUsernameFromCookie(req);
-        if username is () {
-            return {
-                message: "Unauthorized: Invalid or missing authentication token",
-                statusCode: 401
-            };
-        }
+        string username = "";
+        boolean isAuthenticated = hasAuthorizationHeader(req);
 
-        // First verify that the meeting exists and get meeting details
-        map<json> meetingFilter = {
-            "id": meetingId
-        };
-
+        // Check if meeting exists
+        map<json> meetingFilter = { "id": meetingId };
         record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
         if meetingRecord is () {
-            return {
-                message: "Meeting not found",
-                statusCode: 404
-            };
+            return { message: "Meeting not found", statusCode: 404 };
         }
 
-        // Convert to Meeting type
-        json meetingJson = meetingRecord.toJson();
-        Meeting meeting = check meetingJson.cloneWithType(Meeting);
+        ContentItem[] contentArr = [];
 
-        // Check user's role and permission
-        boolean hasPermission = false;
-        string userRole = "";
-
-        // Check if user is creator
-        if meeting.createdBy == username {
-            hasPermission = true;
-            userRole = "creator";
-        }
-        // Check if user is host (for round robin meetings)
-        else if meeting?.hosts is MeetingParticipant[] {
-            foreach MeetingParticipant host in meeting?.hosts ?: [] {
-                if host.username == username {
-                    hasPermission = true;
-                    userRole = "host";
-                    break;
-                }
+        if isAuthenticated {
+            // Authenticated: get username and expect ContentItem[]
+            string? authUsername = check validateAndGetUsernameFromCookie(req);
+            if authUsername is () {
+                return { message: "Unauthorized: Invalid or missing authentication token", statusCode: 401 };
             }
-        }
-        // Check if user is participant
-        else if meeting?.participants is MeetingParticipant[] {
-            foreach MeetingParticipant participant in meeting?.participants ?: [] {
-                if participant.username == username {
-                    hasPermission = true;
-                    userRole = "participant";
-                    break;
-                }
+            username = authUsername;
+
+            // Parse and validate payload
+            json|http:ClientError jsonPayload = req.getJsonPayload();
+            if jsonPayload is http:ClientError {
+                return { message: "Invalid request payload: " + jsonPayload.message(), statusCode: 400 };
             }
-        }
+            SaveContentRequest payload = check jsonPayload.cloneWithType(SaveContentRequest);
+            contentArr = payload.content;
+        } else {
+            // External: username is empty, expect string content
+            json|http:ClientError jsonPayload = req.getJsonPayload();
+            if jsonPayload is http:ClientError {
+                return { message: "Invalid request payload: " + jsonPayload.message(), statusCode: 400 };
+            }
+            ExternalContentRequest payload = check jsonPayload.cloneWithType(ExternalContentRequest);
 
-        if !hasPermission {
-            return {
-                message: "Unauthorized: You must be a creator, host, or participant to submit content",
-                statusCode: 403
+            // Wrap the string as a ContentItem
+            ContentItem item = {
+                url: "",
+                type_: "text",
+                name: "External Content",
+                uploadedAt: time:utcToString(time:utcNow())
             };
+            // Place the string in the name or another field as needed
+            item.name = payload.content;
+            contentArr = [item];
         }
 
-        // Parse the request payload
-        json|http:ClientError jsonPayload = req.getJsonPayload();
-        if jsonPayload is http:ClientError {
-            return {
-                message: "Invalid request payload: " + jsonPayload.message(),
-                statusCode: 400
-            };
-        }
-
-        SaveContentRequest payload = check jsonPayload.cloneWithType(SaveContentRequest);
-
-        // Create new MeetingContent record
         MeetingContent newContent = {
             id: uuid:createType1AsString(),
             meetingId: meetingId,
             uploaderId: username,
             username: username,
-            content: payload.content,
+            content: contentArr,
             createdAt: time:utcToString(time:utcNow())
         };
 
-        // Insert into MongoDB
         _ = check mongodb:contentCollection->insertOne(newContent);
-
-        // Log the content submission
-        log:printInfo(string `Content submitted by ${username} (${userRole}) for meeting ${meetingId}`);
 
         return newContent;
     }
 
     resource function get meetings/[string meetingId]/content(http:Request req) returns MeetingContent[]|ErrorResponse|error {
-        // Extract username from cookie
-        string? username = check validateAndGetUsernameFromCookie(req);
-        if username is () {
-            return {
-                message: "Unauthorized: Invalid or missing authentication token",
-                statusCode: 401
-            };
-        }
-
         // First verify that the meeting exists and get meeting details
         map<json> meetingFilter = {
             "id": meetingId
@@ -1077,43 +1030,6 @@ service /api on ln {
             return {
                 message: "Meeting not found",
                 statusCode: 404
-            };
-        }
-
-        // Convert to Meeting type
-        json meetingJson = meetingRecord.toJson();
-        Meeting meeting = check meetingJson.cloneWithType(Meeting);
-
-        // Check user's role and permission
-        boolean hasPermission = false;
-
-        // Check if user is creator
-        if meeting.createdBy == username {
-            hasPermission = true;
-        }
-        // Check if user is host (for round robin meetings)
-        else if meeting?.hosts is MeetingParticipant[] {
-            foreach MeetingParticipant host in meeting?.hosts ?: [] {
-                if host.username == username {
-                    hasPermission = true;
-                    break;
-                }
-            }
-        }
-        // Check if user is participant
-        else if meeting?.participants is MeetingParticipant[] {
-            foreach MeetingParticipant participant in meeting?.participants ?: [] {
-                if participant.username == username {
-                    hasPermission = true;
-                    break;
-                }
-            }
-        }
-
-        if !hasPermission {
-            return {
-                message: "Unauthorized: You must be a creator, host, or participant to view content",
-                statusCode: 403
             };
         }
 
@@ -1756,6 +1672,164 @@ service /api on ln {
         return resultSettings;
     }
 
+    resource function post availability/externally(http:Request req) returns Availability|ErrorResponse|error {
+        // Parse the request payload
+        json|http:ClientError jsonPayload = req.getJsonPayload();
+        if jsonPayload is http:ClientError {
+            return {
+                message: "Invalid request payload: " + jsonPayload.message(),
+                statusCode: 400
+            };
+        }
+
+        ExternalAvailabilityRequest payload = check jsonPayload.cloneWithType(ExternalAvailabilityRequest);
+
+        // Check if the meeting exists
+        map<json> meetingFilter = {
+            "id": payload.meetingId
+        };
+
+        record {}|() meeting = check mongodb:meetingCollection->findOne(meetingFilter);
+        if meeting is () {
+            return {
+                message: "Meeting not found",
+                statusCode: 404
+            };
+        }
+
+        // Create new availability record
+        Availability availability = {
+            id: uuid:createType1AsString(),
+            username: payload.userId, // Use the provided userId as username
+            meetingId: payload.meetingId,
+            timeSlots: payload.timeSlots
+        };
+
+        // Check if availability already exists
+        map<json> availFilter = {
+            "username": payload.userId,
+            "meetingId": payload.meetingId
+        };
+
+        record {}|() existingAvailability = check mongodb:participantAvailabilityCollection->findOne(availFilter);
+
+        if existingAvailability is () {
+            // Insert new availability
+            _ = check mongodb:participantAvailabilityCollection->insertOne(availability);
+        } else {
+            return {
+                message: "Availability already exists for this user and meeting",
+                statusCode: 409
+            };
+        }
+
+        return availability;
+    }
+
+    resource function put availability/externally(http:Request req) returns Availability|ErrorResponse|error {
+        // Parse the request payload
+        json|http:ClientError jsonPayload = req.getJsonPayload();
+        if jsonPayload is http:ClientError {
+            return {
+                message: "Invalid request payload: " + jsonPayload.message(),
+                statusCode: 400
+            };
+        }
+
+        ExternalAvailabilityRequest payload = check jsonPayload.cloneWithType(ExternalAvailabilityRequest);
+
+        // Check if the meeting exists
+        map<json> meetingFilter = {
+            "id": payload.meetingId
+        };
+
+        record {}|() meeting = check mongodb:meetingCollection->findOne(meetingFilter);
+        if meeting is () {
+            return {
+                message: "Meeting not found",
+                statusCode: 404
+            };
+        }
+
+        // Check if availability exists
+        map<json> availFilter = {
+            "username": payload.userId,
+            "meetingId": payload.meetingId
+        };
+
+        record {}|() existingAvailability = check mongodb:participantAvailabilityCollection->findOne(availFilter);
+
+        if existingAvailability is () {
+            return {
+                message: "Availability not found for this user and meeting",
+                statusCode: 404
+            };
+        }
+
+        // Update the availability
+        mongodb:Update updateOperation = {
+            "set": {
+                "timeSlots": check payload.timeSlots.cloneWithType(json) // Convert TimeSlot[] to json
+            }
+        };
+
+        _ = check mongodb:participantAvailabilityCollection->updateOne(availFilter, updateOperation);
+
+        // Return the updated availability
+        Availability updatedAvailability = {
+            id: (existingAvailability["id"]).toString(),
+            username: payload.userId,
+            meetingId: payload.meetingId,
+            timeSlots: payload.timeSlots
+        };
+
+        return updatedAvailability;
+    }
+
+    // Add to MeetingService.bal inside the service
+    resource function get participant/availability/externally/[string userId]/[string meetingId]() returns ParticipantAvailability|ErrorResponse|error {
+    // Check if the meeting exists
+    map<json> meetingFilter = {
+        "id": meetingId
+    };
+
+    record {}|() meeting = check mongodb:meetingCollection->findOne(meetingFilter);
+    if meeting is () {
+        return {
+            message: "Meeting not found",
+            statusCode: 404
+        };
+    }
+
+    // Create a filter to find availability for this specific user and meeting
+    map<json> filter = {
+        "username": userId,
+        "meetingId": meetingId
+    };
+
+    // Query the participant availability collection
+    record {}|() availabilityRecord = check mongodb:participantAvailabilityCollection->findOne(filter);
+    
+    if availabilityRecord is () {
+        return {
+            message: "No availability found for this user and meeting",
+            statusCode: 404
+        };
+    }
+
+    // Convert to ParticipantAvailability type and add required fields
+    json availJson = availabilityRecord.toJson();
+    map<json> availJsonMap = <map<json>>availJson;
+
+    // Add submittedAt if not present
+    if !availJsonMap.hasKey("submittedAt") {
+        availJsonMap["submittedAt"] = time:utcToString(time:utcNow());
+    }
+
+    ParticipantAvailability availability = check availJsonMap.cloneWithType(ParticipantAvailability);
+    return availability;
+}
+
     // Get notification settings for the authenticated user
     resource function get notification/settings(http:Request req) returns NotificationSettings|ErrorResponse|error {
         // Extract username from cookie
@@ -2191,6 +2265,48 @@ service /api on ln {
         return meeting;
     }
 
+        // Public endpoint to get basic meeting details without authentication
+    resource function get meetings/externally/[string meetingId]() returns ExternalMeeting|ErrorResponse|error {
+        // Create a filter to find the meeting by ID
+        map<json> filter = {
+            "id": meetingId
+        };
+
+        // Query the meeting
+        record {}|() rawMeeting = check mongodb:meetingCollection->findOne(filter);
+
+        if rawMeeting is () {
+            return {
+                message: "Meeting not found",
+                statusCode: 404
+            };
+        }
+
+        // Convert to Meeting type first
+        json meetingJson = rawMeeting.toJson();
+        Meeting fullMeeting = check meetingJson.cloneWithType(Meeting);
+
+        // Create ExternalMeeting response with duration
+        ExternalMeeting externalMeeting = {
+            title: fullMeeting.title,
+            location: fullMeeting.location,
+            description: fullMeeting.description,
+            createdBy: fullMeeting.createdBy,
+            hosts: fullMeeting?.hosts,
+            participants: fullMeeting?.participants ?: [],
+            meetingType: fullMeeting.meetingType
+        };
+
+        // Add duration based on meeting type
+        if fullMeeting.meetingType == "group" {
+            externalMeeting.duration = fullMeeting?.groupDuration ?: "";
+        } else if fullMeeting.meetingType == "round_robin" {
+            externalMeeting.duration = fullMeeting?.roundRobinDuration ?: "";
+        }
+
+        return externalMeeting;
+    }
+
     // Updated endpoint to edit a meeting by ID with proper authorization control
     resource function put meetings/[string meetingId](http:Request req) returns Meeting|error|ErrorResponse {
         // Extract username from cookie
@@ -2279,7 +2395,7 @@ service /api on ln {
                 updateOperations["location"] = locationValue;
             }
 
-            if (updatePayload.hasKey("description")) {
+            if ( updatePayload.hasKey("description")) {
                 string descriptionValue = (updatePayload["description"] ?: "").toString();
                 updatedMeeting.description = descriptionValue;
                 updateOperations["description"] = descriptionValue;
@@ -2329,6 +2445,7 @@ service /api on ln {
                 // Process and add new participants
                 if participantIdList.length() > 0 {
                     MeetingParticipant[] newParticipants = check processParticipants(username, participantIdList);
+                    string[] newParticipantUsernames = []; // Track new participants for notifications
 
                     // Add only participants that aren't in the meeting already
                     MeetingParticipant[] currentParticipants = existingMeeting?.participants ?: [];
@@ -2344,6 +2461,7 @@ service /api on ln {
 
                         if (!alreadyExists) {
                             currentParticipants.push(newParticipant);
+                            newParticipantUsernames.push(newParticipant.username);
                         }
                     }
 
@@ -2351,9 +2469,58 @@ service /api on ln {
                     json participantsJson = check currentParticipants.cloneWithType(json);
                     updateOperations["participants"] = participantsJson;
                     updatedMeeting.participants = currentParticipants;
+
+                    // Create and send notifications to new participants
+                    if newParticipantUsernames.length() > 0 {
+                        // Create notification for new participants
+                        Notification notification = {
+                            id: uuid:createType1AsString(),
+                            title: "Added to Meeting: " + existingMeeting.title,
+                            message: "You have been added to the meeting \"" + existingMeeting.title + "\" by " + username,
+                            notificationType: "confirmation",
+                            meetingId: meetingId,
+                            toWhom: newParticipantUsernames,
+                            createdAt: time:utcToString(time:utcNow())
+                        };
+
+                        // Insert notification
+                        _ = check mongodb:notificationCollection->insertOne(notification);
+
+                        // Handle email notifications
+                        string[] emailRecipients = [];
+                        foreach string recipientUsername in newParticipantUsernames {
+                            // Get user's notification settings
+                            map<json> settingsFilter = {
+                                "username": recipientUsername
+                            };
+
+                            record {}|() settingsRecord = check mongodb:notificationSettingsCollection->findOne(settingsFilter);
+
+                            if settingsRecord is record {} {
+                                json settingsJson = settingsRecord.toJson();
+                                NotificationSettings settings = check settingsJson.cloneWithType(NotificationSettings);
+
+                                if settings.email_notifications {
+                                    emailRecipients.push(recipientUsername);
+                                }
+                            }
+                        }
+
+                        if emailRecipients.length() > 0 {
+                            // Collect email addresses
+                            map<string> participantEmails = check collectParticipantEmails(emailRecipients);
+
+                            // Send email notifications
+                            error? emailResult = sendEmailNotifications(notification, existingMeeting, participantEmails);
+
+                            if emailResult is error {
+                                log:printError("Failed to send email notifications for new participants", emailResult);
+                                // Continue execution even if email sending fails
+                            }
+                        }
+                    }
                 }
             }
-
             // Remove participants
             if (updatePayload.hasKey("removeParticipants")) {
                 json[] removeUsernames = [];
@@ -2612,15 +2779,102 @@ service /api on ln {
 
     // create notes related to a meeting
     resource function post meetings/[string meetingId]/notes(http:Request req) returns Note|ErrorResponse|error {
-        // Extract username from cookie
-        string? username = check validateAndGetUsernameFromCookie(req);
-        if username is () {
-            return {
-                message: "Unauthorized: Invalid or missing authentication token",
-                statusCode: 401
-            };
-        }
+        if hasAuthorizationHeader(req){
+            // Extract username from cookie
+            string? username = check validateAndGetUsernameFromCookie(req);
+            if username is () {
+                return {
+                    message: "Unauthorized: Invalid or missing authentication token",
+                    statusCode: 401
+                };
+            }
 
+            // Verify meeting exists and user has access
+            map<json> meetingFilter = {
+                "id": meetingId
+            };
+
+            record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
+            if meetingRecord is () {
+                return {
+                    message: "Meeting not found",
+                    statusCode: 404
+                };
+            }
+
+            // Convert to Meeting type
+            json meetingJson = meetingRecord.toJson();
+            Meeting meeting = check meetingJson.cloneWithType(Meeting);
+
+            // Check user's permission
+            boolean hasPermission = false;
+
+            // Check if user is creator
+            if meeting.createdBy == username {
+                hasPermission = true;
+            }
+            // Check if user is host
+            else if meeting?.hosts is MeetingParticipant[] {
+                foreach MeetingParticipant host in meeting?.hosts ?: [] {
+                    if host.username == username {
+                        hasPermission = true;
+                        break;
+                    }
+                }
+            }
+            // Check if user is participant
+            else if meeting?.participants is MeetingParticipant[] {
+                foreach MeetingParticipant participant in meeting?.participants ?: [] {
+                    if participant.username == username {
+                        hasPermission = true;
+                        break;
+                    }
+                }
+            }
+
+            if !hasPermission {
+                return {
+                    message: "Unauthorized: You must be a creator, host, or participant to create notes",
+                    statusCode: 403
+                };
+            }
+
+            // Parse request payload
+            json|http:ClientError jsonPayload = req.getJsonPayload();
+            if jsonPayload is http:ClientError {
+                return {
+                    message: "Invalid request payload",
+                    statusCode: 400
+                };
+            }
+
+            // Validate note content
+            map<json> payload = <map<json>>jsonPayload;
+            if !payload.hasKey("noteContent") || payload.noteContent == "" {
+                return {
+                    message: "Note content is required",
+                    statusCode: 400
+                };
+            }
+
+            string currentTime = time:utcToString(time:utcNow());
+
+            // Create note record
+            Note note = {
+                id: uuid:createType1AsString(),
+                username: username,
+                meetingId: meetingId,
+                noteContent: check payload.noteContent.ensureType(),
+                createdAt: currentTime,
+                updatedAt: currentTime
+            };
+
+            // Insert into MongoDB
+            _ = check mongodb:noteCollection->insertOne(note);
+
+            return note;
+            
+        }
         // Verify meeting exists and user has access
         map<json> meetingFilter = {
             "id": meetingId
@@ -2631,43 +2885,6 @@ service /api on ln {
             return {
                 message: "Meeting not found",
                 statusCode: 404
-            };
-        }
-
-        // Convert to Meeting type
-        json meetingJson = meetingRecord.toJson();
-        Meeting meeting = check meetingJson.cloneWithType(Meeting);
-
-        // Check user's permission
-        boolean hasPermission = false;
-
-        // Check if user is creator
-        if meeting.createdBy == username {
-            hasPermission = true;
-        }
-        // Check if user is host
-        else if meeting?.hosts is MeetingParticipant[] {
-            foreach MeetingParticipant host in meeting?.hosts ?: [] {
-                if host.username == username {
-                    hasPermission = true;
-                    break;
-                }
-            }
-        }
-        // Check if user is participant
-        else if meeting?.participants is MeetingParticipant[] {
-            foreach MeetingParticipant participant in meeting?.participants ?: [] {
-                if participant.username == username {
-                    hasPermission = true;
-                    break;
-                }
-            }
-        }
-
-        if !hasPermission {
-            return {
-                message: "Unauthorized: You must be a creator, host, or participant to create notes",
-                statusCode: 403
             };
         }
 
@@ -2694,7 +2911,7 @@ service /api on ln {
         // Create note record
         Note note = {
             id: uuid:createType1AsString(),
-            username: username,
+            username: "",
             meetingId: meetingId,
             noteContent: check payload.noteContent.ensureType(),
             createdAt: currentTime,
@@ -2709,15 +2926,6 @@ service /api on ln {
 
     // get notes related to a meeting and logged in user
     resource function get meetings/[string meetingId]/notes(http:Request req) returns Note[]|ErrorResponse|error {
-        // Extract username from cookie
-        string? username = check validateAndGetUsernameFromCookie(req);
-        if username is () {
-            return {
-                message: "Unauthorized: Invalid or missing authentication token",
-                statusCode: 401
-            };
-        }
-
         // Verify meeting exists and user has access
         map<json> meetingFilter = {
             "id": meetingId
@@ -2730,44 +2938,6 @@ service /api on ln {
                 statusCode: 404
             };
         }
-
-        // Convert to Meeting type
-        json meetingJson = meetingRecord.toJson();
-        Meeting meeting = check meetingJson.cloneWithType(Meeting);
-
-        // Check user's permission
-        boolean hasPermission = false;
-
-        // Check if user is creator
-        if meeting.createdBy == username {
-            hasPermission = true;
-        }
-        // Check if user is host
-        else if meeting?.hosts is MeetingParticipant[] {
-            foreach MeetingParticipant host in meeting?.hosts ?: [] {
-                if host.username == username {
-                    hasPermission = true;
-                    break;
-                }
-            }
-        }
-        // Check if user is participant
-        else if meeting?.participants is MeetingParticipant[] {
-            foreach MeetingParticipant participant in meeting?.participants ?: [] {
-                if participant.username == username {
-                    hasPermission = true;
-                    break;
-                }
-            }
-        }
-
-        if !hasPermission {
-            return {
-                message: "Unauthorized: You must be a creator, host, or participant to view notes",
-                statusCode: 403
-            };
-        }
-
         // Get all notes for this meeting
         map<json> noteFilter = {
             "meetingId": meetingId
@@ -2785,6 +2955,8 @@ service /api on ln {
             };
 
         return notes;
+
+        
     }
 
     // Add to MeetingService.bal in the service
@@ -2831,4 +3003,5 @@ service /api on ln {
             "noteId": noteId
         };
     }
+    
 }
