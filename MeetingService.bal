@@ -295,7 +295,7 @@ service /api on ln {
     }
 
     // endpoint to cancel meetings
-    resource function delete meetings/[string meetingId](http:Request req) returns json|http:Response|error {
+    resource function post meetings/[string meetingId](http:Request req) returns json|http:Response|error {
         // Extract username from cookie
         string? username = check validateAndGetUsernameFromCookie(req);
         if username is () {
@@ -326,6 +326,16 @@ service /api on ln {
         json meetingJson = rawMeeting.toJson();
         Meeting meeting = check meetingJson.cloneWithType(Meeting);
 
+        // Check if meeting is already canceled
+        if meeting?.status == "canceled" {
+            http:Response response = new;
+            response.statusCode = 400;
+            response.setJsonPayload({
+                message: "Meeting is already canceled"
+            });
+            return response;
+        }
+
         // Check if the user is the creator or a host
         boolean hasPermission = false;
 
@@ -352,23 +362,7 @@ service /api on ln {
         // Collect all related users for notification
         string[] allUsers = [];
         string[] emailRecipients = [];
-        foreach string userUsername in allUsers {
-            // Get user's notification settings
-            map<json> settingsFilter = {
-                "username": userUsername
-            };
-
-            record {}|() settingsRecord = check mongodb:notificationSettingsCollection->findOne(settingsFilter);
-
-            if settingsRecord is record {} {
-                json settingsJson = settingsRecord.toJson();
-                NotificationSettings settings = check settingsJson.cloneWithType(NotificationSettings);
-
-                if settings.email_notifications {
-                    emailRecipients.push(userUsername);
-                }
-            }
-        }
+        
         // Add creator to users
         allUsers.push(meeting.createdBy);
 
@@ -395,6 +389,40 @@ service /api on ln {
             }
         }
 
+        // Check notification settings for all users
+        foreach string userUsername in allUsers {
+            // Get user's notification settings
+            map<json> settingsFilter = {
+                "username": userUsername
+            };
+
+            record {}|() settingsRecord = check mongodb:notificationSettingsCollection->findOne(settingsFilter);
+
+            if settingsRecord is record {} {
+                json settingsJson = settingsRecord.toJson();
+                NotificationSettings settings = check settingsJson.cloneWithType(NotificationSettings);
+
+                if settings.email_notifications {
+                    emailRecipients.push(userUsername);
+                }
+            }
+        }
+
+        // Update meeting status to "canceled"
+        map<json> updateFilter = {
+            "id": meetingId
+        };
+        
+        mongodb:Update updateDoc = {
+            set: {
+                "status": "canceled",
+                "canceledBy": username,
+                "canceledAt": time:utcToString(time:utcNow())
+            }
+        };
+
+        _ = check mongodb:meetingCollection->updateOne(updateFilter, updateDoc);
+
         // Create cancellation notification
         Notification notification = {
             id: uuid:createType1AsString(),
@@ -409,11 +437,7 @@ service /api on ln {
         // Insert notification
         _ = check mongodb:notificationCollection->insertOne(notification);
 
-        // Delete meeting and all related records
-
-        // 1. Delete the meeting
-        _ = check mongodb:meetingCollection->deleteOne(filter);
-
+        // Send email notifications if there are recipients
         if emailRecipients.length() > 0 {
             // Collect email addresses for all recipients
             map<string> participantEmails = check collectParticipantEmails(emailRecipients);
@@ -427,24 +451,14 @@ service /api on ln {
             }
         }
 
-        // 2. Delete meeting assignments
-        map<json> assignmentFilter = {
-            "meetingId": meetingId
-        };
-        _ = check mongodb:meetinguserCollection->deleteMany(assignmentFilter);
-
-        // 3. Delete availabilities
-        map<json> availabilityFilter = {
-            "meetingId": meetingId
-        };
-        _ = check mongodb:availabilityCollection->deleteMany(availabilityFilter);
+        // Note: We no longer delete meeting assignments and availabilities
+        // They are kept for historical purposes and the meeting status indicates it's canceled
 
         return {
             "status": "success",
             "message": "Meeting canceled successfully"
         };
     }
-
   
   
   
@@ -2010,90 +2024,93 @@ service /api on ln {
 
     // Updated endpoint to get meetings with cookie authentication
     resource function get meetings(http:Request req) returns Meeting[]|ErrorResponse|error {
-        // Extract username from cookie
-        string? username = check validateAndGetUsernameFromCookie(req);
-        if username is () {
-            return {
-                message: "Unauthorized: Invalid or missing authentication token",
-                statusCode: 401
-            };
-        }
+    // Extract username from cookie
+    string? username = check validateAndGetUsernameFromCookie(req);
+    if username is () {
+        return {
+            message: "Unauthorized: Invalid or missing authentication token",
+            statusCode: 401
+        };
+    }
 
-        Meeting[] meetings = [];
-        map<string> meetingIds = {}; // To track already added meetings
+    Meeting[] meetings = [];
+    map<string> meetingIds = {}; // To track already added meetings
 
-        // 1. Find meetings created by this user
-        map<json> createdByFilter = {
-            "createdBy": username
+    // 1. Find meetings created by this user (excluding canceled ones)
+    map<json> createdByFilter = {
+        "createdBy": username,
+        "status": {"$ne": "canceled"}  // Exclude canceled meetings
+    };
+
+    stream<record {}, error?> createdMeetingCursor = check mongodb:meetingCollection->find(createdByFilter);
+
+    // Process the results for created meetings
+    check from record {} meetingData in createdMeetingCursor
+        do {
+            json jsonData = meetingData.toJson();
+            Meeting meeting = check jsonData.cloneWithType(Meeting);
+            // Mark as created by user
+            meeting["role"] = "creator";
+            meetings.push(meeting);
+            meetingIds[meeting.id] = "added"; // Mark as added
         };
 
-        stream<record {}, error?> createdMeetingCursor = check mongodb:meetingCollection->find(createdByFilter);
+    // 2. Find meetings where user is a participant (excluding canceled ones)
+    map<json> participantFilter = {
+        "participants": {
+            "$elemMatch": {
+                "username": username
+            }
+        },
+        "status": {"$ne": "canceled"}  // Exclude canceled meetings
+    };
 
-        // Process the results for created meetings
-        check from record {} meetingData in createdMeetingCursor
-            do {
-                json jsonData = meetingData.toJson();
-                Meeting meeting = check jsonData.cloneWithType(Meeting);
-                // Mark as created by user
-                meeting["role"] = "creator";
+    stream<record {}, error?> participantMeetingCursor = check mongodb:meetingCollection->find(participantFilter);
+
+    // Process the results for participant meetings
+    check from record {} meetingData in participantMeetingCursor
+        do {
+            json jsonData = meetingData.toJson();
+            Meeting meeting = check jsonData.cloneWithType(Meeting);
+
+            // Skip if already added
+            if (meeting.createdBy != username && !meetingIds.hasKey(meeting.id)) {
+                // Mark as participant
+                meeting["role"] = "participant";
                 meetings.push(meeting);
                 meetingIds[meeting.id] = "added"; // Mark as added
-            };
-
-        // 2. Find meetings where user is a participant
-        map<json> participantFilter = {
-            "participants": {
-                "$elemMatch": {
-                    "username": username
-                }
             }
         };
 
-        stream<record {}, error?> participantMeetingCursor = check mongodb:meetingCollection->find(participantFilter);
+    // 3. Find meetings where user is a host (excluding canceled ones)
+    map<json> hostFilter = {
+        "hosts": {
+            "$elemMatch": {
+                "username": username
+            }
+        },
+        "status": {"$ne": "canceled"}  // Exclude canceled meetings
+    };
 
-        // Process the results for participant meetings
-        check from record {} meetingData in participantMeetingCursor
-            do {
-                json jsonData = meetingData.toJson();
-                Meeting meeting = check jsonData.cloneWithType(Meeting);
+    stream<record {}, error?> hostMeetingCursor = check mongodb:meetingCollection->find(hostFilter);
 
-                // Skip if already added
-                if (meeting.createdBy != username && !meetingIds.hasKey(meeting.id)) {
-                    // Mark as participant
-                    meeting["role"] = "participant";
-                    meetings.push(meeting);
-                    meetingIds[meeting.id] = "added"; // Mark as added
-                }
-            };
+    // Process the results for host meetings
+    check from record {} meetingData in hostMeetingCursor
+        do {
+            json jsonData = meetingData.toJson();
+            Meeting meeting = check jsonData.cloneWithType(Meeting);
 
-        // 3. Find meetings where user is a host
-        map<json> hostFilter = {
-            "hosts": {
-                "$elemMatch": {
-                    "username": username
-                }
+            // Skip if already added
+            if (!meetingIds.hasKey(meeting.id)) {
+                // Mark as host
+                meeting["role"] = "host";
+                meetings.push(meeting);
+                meetingIds[meeting.id] = "added"; // Mark as added
             }
         };
 
-        stream<record {}, error?> hostMeetingCursor = check mongodb:meetingCollection->find(hostFilter);
-
-        // Process the results for host meetings
-        check from record {} meetingData in hostMeetingCursor
-            do {
-                json jsonData = meetingData.toJson();
-                Meeting meeting = check jsonData.cloneWithType(Meeting);
-
-                // Skip if already added
-                if (!meetingIds.hasKey(meeting.id)) {
-                    // Mark as host
-                    meeting["role"] = "host";
-                    meetings.push(meeting);
-                    meetingIds[meeting.id] = "added"; // Mark as added
-                }
-            };
-
-        return meetings;
-    }
+    return meetings;
+}
 
     // Updated endpoint to get meeting details by ID with cookie authentication
     resource function get meetings/[string meetingId](http:Request req) returns Meeting|ErrorResponse|error {
