@@ -4,6 +4,7 @@ import mongodb_atlas_app.mongodb;
 import ballerina/time;
 import ballerina/log;
 
+configurable string hfApiKey = ?;
 
 @http:ServiceConfig {
     cors: {
@@ -14,6 +15,8 @@ import ballerina/log;
         maxAge: 84900
     }
 }
+
+
 service /api/analytics on ln {
     
     // Create a new transcript - Explicitly specify ErrorResponse as the error type
@@ -1122,8 +1125,7 @@ service /api/analytics on ln {
 
     // Primary Hugging Face API call with multiple model fallbacks
     function tryHuggingFaceAPI(string prompt) returns string|error {
-        // Free Hugging Face API key (get from huggingface.co/settings/tokens)
-        string hfApiKey = "some_api_key"; // Replace with your actual key
+
         
         // Try multiple free models for better success rate
         string[] models = [

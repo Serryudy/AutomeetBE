@@ -7,14 +7,14 @@ import ballerina/time;
 import ballerina/uuid;
 
 // Google OAuth config - add your client values in production
-configurable string googleClientId = "751259024059-q80a9la618pq41b7nnua3gigv29e0f46.apps.googleusercontent.com";
-configurable string googleClientSecret = "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";
-configurable string googleRedirectUri = "http://localhost:8080/api/auth/google/callback";
-configurable string googleCalendarRedirectUri = "http://localhost:8080/api/auth/google/calendar/callback";
-configurable string frontendBaseUrl = "http://localhost:3000";
+configurable string googleClientId = ?;
+configurable string googleClientSecret = ?;
+configurable string googleRedirectUri = ?;
+configurable string googleCalendarRedirectUri = ?;
+configurable string frontendBaseUrl = ?;
 
 // JWT signing key - in production, this should be in a secure configuration
-final string & readonly JWT_SECRET = "dummy";
+configurable string JWT_SECRET = ?;
 
 // Function to hash passwords using SHA-256
 function hashPassword(string password) returns string {
