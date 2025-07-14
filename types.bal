@@ -1,7 +1,7 @@
 // Meeting related types
 public type MeetingType "direct" | "group" | "round_robin";
 public type MeetingStatus "pending" | "confirmed" | "canceled";
-public type NotificationType "creation" | "cancellation" | "confirmation" | "availability_request";
+public type NotificationType "creation" | "cancellation" | "confirmation" | "availability_request" | "availability_update";
 
 // User and auth types
 public type User record {
@@ -102,6 +102,7 @@ public type Meeting record {
     string? roundRobinDuration?;
     MeetingParticipant[]? hosts?;
     MeetingParticipant[]? participants?;
+    boolean deadlineNotificationSent = false;
 };
 
 public type MeetingContent record {
@@ -241,7 +242,7 @@ public type MeetingAssignment record {
 public type MeetingAnalytics record {
     string meetingId;
     DayFrequency[] reschedulingFrequency;
-    AccuracyMetric[] schedulingAccuracy;
+    AccuracyMetric[]|string schedulingAccuracy;
     EngagementMetrics engagement;
     string createdAt;
     string updatedAt;
@@ -296,4 +297,70 @@ public type Note record {
     string noteContent;
     string createdAt;
     string updatedAt;
+};
+
+public type ExternalMeeting record {
+    string title;
+    string location;
+    string description;
+    string createdBy;
+    MeetingParticipant[]? hosts = [];
+    MeetingParticipant[] participants;
+    string meetingType;
+    string duration?;
+};
+
+public type ExternalAvailabilityRequest record {
+    string userId;
+    string meetingId;
+    TimeSlot[] timeSlots;
+};
+
+public type AvailabilityNotificationStatus record {
+    string meetingId;
+    string lastNotificationDate;
+    int submissionCount;
+};
+
+public type ExternalContentRequest record {
+    string content;
+};
+
+
+public type ExternalUserMapping record {
+    string id;
+    string externalUserId;
+    string email;
+    string meetingId;
+    string createdAt;
+};
+
+public type AIReport record {
+    string id;
+    string meetingId;
+    string reportContent;
+    string generatedBy;
+    string createdAt;
+    string updatedAt;
+};
+
+public type HuggingFaceRequest record {
+    string inputs;
+    HuggingFaceParameters parameters?;
+    map<json> options?;
+};
+
+public type HuggingFaceParameters record {
+    int max_length?;
+    float temperature?;
+    boolean do_sample?;
+    float top_p?;
+    int num_return_sequences?;
+};
+
+public type OllamaRequest record {
+    string model;
+    string prompt;
+    boolean Stream?;
+    map<json> options?;
 };
