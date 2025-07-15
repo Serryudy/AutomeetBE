@@ -184,6 +184,7 @@ service /api/users on ln {
                 };
             }
             
+            
             // Convert to User type
             json userJson = userRecord.toJson();
             User user = check userJson.cloneWithType(User);
