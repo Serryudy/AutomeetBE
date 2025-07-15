@@ -45,6 +45,7 @@ service /api/analytics on ln {
         
         TranscriptRequest payload = check jsonPayload.cloneWithType(TranscriptRequest);
         
+        
         // Validate the required fields
         if payload.meetingId == "" {
             http:Response response = new;
