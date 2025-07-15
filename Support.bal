@@ -171,17 +171,14 @@ public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? {
             Meeting currentMeeting = check meetingJson.cloneWithType(Meeting);
 
             // Check if notification has already been sent using member access
-            boolean notificationSent = false;
-            if (currentMeeting.hasKey("deadlineNotificationSent")) {
-                anydata notificationValue = currentMeeting.get("deadlineNotificationSent");
-                if (notificationValue is boolean) {
-                    notificationSent = notificationValue;
-                }
+            boolean notificationSent = true;
+            if (currentMeeting.deadlineNotificationSent is boolean) {
+                notificationSent = currentMeeting.deadlineNotificationSent;
             }
 
-            if (!notificationSent) {
+            if (!notificationSent && currentMeeting.status == "pending") {
                 // Send notification for the first time             
-                _ = check notifyCreatorToReschedule(meeting, <string>earliestTime);
+                _ = check notifyCreatorToReschedule(meeting);
 
                 // Update the meeting record to mark notification as sent             
                 map<json> updateDoc = {
@@ -199,13 +196,12 @@ public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? {
                 );
             } else {
                 io:println("Notification already sent for meeting: " + meeting.id);
-                return;
             }
         } else {
             io:println("Meeting record not found in database");
-            return;
+
         }
-        return;
+        io:println("Meeting record not found in database");
     }
 
     // Determine the best time slot based on matching availabilities from both collections
@@ -416,7 +412,7 @@ public function findBestTimeSlot(Meeting meeting) returns TimeSlot?|error {
 }
 
 // Helper function to notify the creator to reschedule
-public function notifyCreatorToReschedule(Meeting meeting, string deadline) returns error? {
+public function notifyCreatorToReschedule(Meeting meeting) returns error? {
     // Create notification for the creator
     string[] recipients = [meeting.createdBy];
 
@@ -451,7 +447,7 @@ public function notifyCreatorToReschedule(Meeting meeting, string deadline) retu
             error? emailResult = sendEmailNotifications(notification, meeting, creatorEmail);
 
             if (emailResult is error) {
-                log:printError("Failed to send reschedule email notification to creator");
+                log:printError("Failed to send reschedule email notification to creator", emailResult);
                 // Continue execution even if email sending fails
             }
         }
@@ -607,6 +603,166 @@ public function processParticipants(string creatorUsername, string[] participant
     return processedParticipants;
 }
 
+//Create Meeting notification
+public function createMeetingNotification(string meetingId, string meetingTitle, MeetingType meetingType, MeetingParticipant[] participants, MeetingParticipant[]? hosts = ()) returns Notification|error {
+    // Separate lists for different types of recipients
+    string[] creatorAndHostRecipients = []; // For creator and hosts
+    string[] participantRecipients = []; // For regular participants
+
+    // Add all participants to participants list
+    foreach MeetingParticipant participant in participants {
+        participantRecipients.push(participant.username);
+    }
+
+    // Add hosts to creator/host list if it's a round_robin meeting
+    if hosts is MeetingParticipant[] {
+        foreach MeetingParticipant host in hosts {
+            boolean alreadyExists = false;
+            foreach string existingUser in creatorAndHostRecipients {
+                if (existingUser == host.username) {
+                    alreadyExists = true;
+                    break;
+                }
+            }
+
+            if (!alreadyExists) {
+                creatorAndHostRecipients.push(host.username);
+
+                // Also remove the host from participants list if they were in it
+                int indexToRemove = -1;
+                int i = 0;
+                foreach string participant in participantRecipients {
+                    if (participant == host.username) {
+                        indexToRemove = i;
+                        break;
+                    }
+                    i = i + 1;
+                }
+
+                if (indexToRemove >= 0) {
+                    participantRecipients = [...participantRecipients.slice(0, indexToRemove), ...participantRecipients.slice(indexToRemove + 1)];
+                }
+            }
+        }
+    }
+
+    // Create and send notifications based on recipient type and meeting type
+
+    // First, create notification for creator and hosts (always creation type)
+    if (creatorAndHostRecipients.length() > 0) {
+        Notification creatorHostNotification = {
+            id: uuid:createType1AsString(),
+            title: meetingTitle + " Creation",
+            message: "You have created or are hosting a new meeting: " + meetingTitle,
+            notificationType: "creation", // Always creation type for creator/hosts
+            meetingId: meetingId,
+            toWhom: creatorAndHostRecipients,
+            createdAt: time:utcToString(time:utcNow())
+        };
+
+        // Insert the notification
+        _ = check mongodb:notificationCollection->insertOne(creatorHostNotification);
+
+        // Handle email notifications if needed
+        if creatorAndHostRecipients.length() > 0 {
+            // Get the meeting details
+            map<json> meetingFilter = {
+                "id": meetingId
+            };
+
+            record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
+
+            if meetingRecord is record {} {
+                json meetingJson = meetingRecord.toJson();
+                Meeting meeting = check meetingJson.cloneWithType(Meeting);
+
+                // Collect email addresses for all recipients
+                map<string> creatorEmails = check collectParticipantEmails(creatorAndHostRecipients);
+
+                // Send email notifications
+                error? emailResult = sendEmailNotifications(creatorHostNotification, meeting, creatorEmails);
+
+                if emailResult is error {
+                    log:printError("Failed to send creation email notifications", emailResult);
+                    // Continue execution even if email sending fails
+                }
+            }
+        }
+    }
+
+    // Now, create notification for participants based on meeting type
+    if (participantRecipients.length() > 0) {
+        string participantTitle;
+        string participantMessage;
+        NotificationType participantNotifType;
+
+        if meetingType == "direct" {
+            participantTitle = meetingTitle + " Creation";
+            participantMessage = "You have been invited to a new meeting: " + meetingTitle;
+            participantNotifType = "creation";
+        } else if meetingType == "group" {
+            participantTitle = meetingTitle + " - Please Mark Your Availability";
+            participantMessage = "You have been invited to a new group meeting: \"" + meetingTitle + "\". Please mark your availability.";
+            participantNotifType = "availability_request";
+        } else { // round_robin
+            participantTitle = meetingTitle + " - Please Mark Your Availability";
+            participantMessage = "You have been invited to a new round-robin meeting: \"" + meetingTitle + "\". Please mark your availability.";
+            participantNotifType = "availability_request";
+        }
+
+        Notification participantNotification = {
+            id: uuid:createType1AsString(),
+            title: participantTitle,
+            message: participantMessage,
+            notificationType: participantNotifType,
+            meetingId: meetingId,
+            toWhom: participantRecipients,
+            createdAt: time:utcToString(time:utcNow())
+        };
+
+        // Insert the notification
+        _ = check mongodb:notificationCollection->insertOne(participantNotification);
+
+        // Handle email notifications if needed
+        if participantRecipients.length() > 0 {
+            // Get the meeting details
+            map<json> meetingFilter = {
+                "id": meetingId
+            };
+
+            record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
+
+            if meetingRecord is record {} {
+                json meetingJson = meetingRecord.toJson();
+                Meeting meeting = check meetingJson.cloneWithType(Meeting);
+
+                // Collect email addresses for all recipients
+                map<string> participantEmails = check collectParticipantEmails(participantRecipients);
+
+                // Send email notifications
+                error? emailResult = sendEmailNotifications(participantNotification, meeting, participantEmails);
+
+                if emailResult is error {
+                    log:printError("Failed to send participant email notifications", emailResult);
+                    // Continue execution even if email sending fails
+                }
+            }
+        }
+    }
+
+    // Return a dummy notification - we've already inserted the actual notifications
+    return {
+        id: uuid:createType1AsString(),
+        title: meetingTitle,
+        message: "Meeting notification sent",
+        notificationType: "creation",
+        meetingId: meetingId,
+        toWhom: [],
+        createdAt: time:utcToString(time:utcNow())
+    };
+}
+
+//Sent Email Notifications
 public function sendEmailNotifications(Notification notification, Meeting meeting, map<string> participantEmails) returns error? {
     // Email configuration
     EmailConfig emailConfig = {
@@ -841,164 +997,6 @@ public function collectParticipantEmails(string[] usernames) returns map<string>
 
     log:printInfo("Email collection complete. Found " + emails.length().toString() + " emails");
     return emails;
-}
-
-public function createMeetingNotification(string meetingId, string meetingTitle, MeetingType meetingType, MeetingParticipant[] participants, MeetingParticipant[]? hosts = ()) returns Notification|error {
-    // Separate lists for different types of recipients
-    string[] creatorAndHostRecipients = []; // For creator and hosts
-    string[] participantRecipients = []; // For regular participants
-
-    // Add all participants to participants list
-    foreach MeetingParticipant participant in participants {
-        participantRecipients.push(participant.username);
-    }
-
-    // Add hosts to creator/host list if it's a round_robin meeting
-    if hosts is MeetingParticipant[] {
-        foreach MeetingParticipant host in hosts {
-            boolean alreadyExists = false;
-            foreach string existingUser in creatorAndHostRecipients {
-                if (existingUser == host.username) {
-                    alreadyExists = true;
-                    break;
-                }
-            }
-
-            if (!alreadyExists) {
-                creatorAndHostRecipients.push(host.username);
-
-                // Also remove the host from participants list if they were in it
-                int indexToRemove = -1;
-                int i = 0;
-                foreach string participant in participantRecipients {
-                    if (participant == host.username) {
-                        indexToRemove = i;
-                        break;
-                    }
-                    i = i + 1;
-                }
-
-                if (indexToRemove >= 0) {
-                    participantRecipients = [...participantRecipients.slice(0, indexToRemove), ...participantRecipients.slice(indexToRemove + 1)];
-                }
-            }
-        }
-    }
-
-    // Create and send notifications based on recipient type and meeting type
-
-    // First, create notification for creator and hosts (always creation type)
-    if (creatorAndHostRecipients.length() > 0) {
-        Notification creatorHostNotification = {
-            id: uuid:createType1AsString(),
-            title: meetingTitle + " Creation",
-            message: "You have created or are hosting a new meeting: " + meetingTitle,
-            notificationType: "creation", // Always creation type for creator/hosts
-            meetingId: meetingId,
-            toWhom: creatorAndHostRecipients,
-            createdAt: time:utcToString(time:utcNow())
-        };
-
-        // Insert the notification
-        _ = check mongodb:notificationCollection->insertOne(creatorHostNotification);
-
-        // Handle email notifications if needed
-        if creatorAndHostRecipients.length() > 0 {
-            // Get the meeting details
-            map<json> meetingFilter = {
-                "id": meetingId
-            };
-
-            record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
-
-            if meetingRecord is record {} {
-                json meetingJson = meetingRecord.toJson();
-                Meeting meeting = check meetingJson.cloneWithType(Meeting);
-
-                // Collect email addresses for all recipients
-                map<string> creatorEmails = check collectParticipantEmails(creatorAndHostRecipients);
-
-                // Send email notifications
-                error? emailResult = sendEmailNotifications(creatorHostNotification, meeting, creatorEmails);
-
-                if emailResult is error {
-                    log:printError("Failed to send creation email notifications", emailResult);
-                    // Continue execution even if email sending fails
-                }
-            }
-        }
-    }
-
-    // Now, create notification for participants based on meeting type
-    if (participantRecipients.length() > 0) {
-        string participantTitle;
-        string participantMessage;
-        NotificationType participantNotifType;
-
-        if meetingType == "direct" {
-            participantTitle = meetingTitle + " Creation";
-            participantMessage = "You have been invited to a new meeting: " + meetingTitle;
-            participantNotifType = "creation";
-        } else if meetingType == "group" {
-            participantTitle = meetingTitle + " - Please Mark Your Availability";
-            participantMessage = "You have been invited to a new group meeting: \"" + meetingTitle + "\". Please mark your availability.";
-            participantNotifType = "availability_request";
-        } else { // round_robin
-            participantTitle = meetingTitle + " - Please Mark Your Availability";
-            participantMessage = "You have been invited to a new round-robin meeting: \"" + meetingTitle + "\". Please mark your availability.";
-            participantNotifType = "availability_request";
-        }
-
-        Notification participantNotification = {
-            id: uuid:createType1AsString(),
-            title: participantTitle,
-            message: participantMessage,
-            notificationType: participantNotifType,
-            meetingId: meetingId,
-            toWhom: participantRecipients,
-            createdAt: time:utcToString(time:utcNow())
-        };
-
-        // Insert the notification
-        _ = check mongodb:notificationCollection->insertOne(participantNotification);
-
-        // Handle email notifications if needed
-        if participantRecipients.length() > 0 {
-            // Get the meeting details
-            map<json> meetingFilter = {
-                "id": meetingId
-            };
-
-            record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
-
-            if meetingRecord is record {} {
-                json meetingJson = meetingRecord.toJson();
-                Meeting meeting = check meetingJson.cloneWithType(Meeting);
-
-                // Collect email addresses for all recipients
-                map<string> participantEmails = check collectParticipantEmails(participantRecipients);
-
-                // Send email notifications
-                error? emailResult = sendEmailNotifications(participantNotification, meeting, participantEmails);
-
-                if emailResult is error {
-                    log:printError("Failed to send participant email notifications", emailResult);
-                    // Continue execution even if email sending fails
-                }
-            }
-        }
-    }
-
-    // Return a dummy notification - we've already inserted the actual notifications
-    return {
-        id: uuid:createType1AsString(),
-        title: meetingTitle,
-        message: "Meeting notification sent",
-        notificationType: "creation",
-        meetingId: meetingId,
-        toWhom: [],
-        createdAt: time:utcToString(time:utcNow())
-    };
 }
 
 // Function to validate that all contact IDs belong to the user

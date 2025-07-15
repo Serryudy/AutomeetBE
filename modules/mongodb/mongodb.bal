@@ -33,6 +33,12 @@ public mongodb:Collection transcriptCollection = getCollectionRef("transcripts")
 public mongodb:Collection contentCollection = getCollectionRef("content");
 public mongodb:Collection analyticsCollection = getCollectionRef("analytics");
 public mongodb:Collection noteCollection = getCollectionRef("notes");
+<<<<<<< HEAD
+=======
+public mongodb:Collection availabilityNotificationStatusCollection = getCollectionRef("availability_notification_status");
+public mongodb:Collection externalUserMappingCollection = getCollectionRef("externalUserMappings");
+public final mongodb:Collection aiReportCollection =  getCollectionRef("aiReports");
+>>>>>>> 79377e9f67728db23fa47f37dfcba0ca5ccc0e9f
 // Initialize MongoDB client - handles the error internally
 function initMongoDbClient() returns mongodb:Client {
     mongodb:Client|error dbclient = new ({

@@ -3,7 +3,7 @@ import ballerina/log;
 import ballerina/jwt;
 import ballerina/url;
 import ballerina/uuid;
-import mongodb_atlas_app.mongodb; 
+import mongodb_atlas_app.mongodb;
 
 @http:ServiceConfig {
     cors: {
