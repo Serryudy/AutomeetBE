@@ -671,7 +671,7 @@ public function processParticipants(string creatorUsername, string[] participant
 public function sendEmailNotifications(Notification notification, Meeting meeting, map<string> participantEmails) returns error? {
     EmailConfig emailConfig = {
         host: "smtp.gmail.com",
-        username: "somapalagalagedara@gmail.com",
+        username: "automeetifac@gamil.com",
         password: "wzhd plxq isxl nddc",
         frontendUrl: "http://localhost:3000"
     };
@@ -1256,7 +1256,7 @@ public function sendUnregisteredParticipantEmails(string[] unregisteredUsernames
     
     EmailConfig emailConfig = {
         host: "smtp.gmail.com",
-        username: "somapalagalagedara@gmail.com",
+        username: "automeetifac@gmail.com",
         password: "wzhd plxq isxl nddc",
         frontendUrl: "http://localhost:3000"
     };
