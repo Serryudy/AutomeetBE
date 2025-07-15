@@ -117,7 +117,7 @@ public function checkAndNotifyParticipantsForRoundRobin(Meeting meeting) returns
 }
 
 // Function to check if deadline has passed and calculate best time slot
-public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? { 
+public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? {
     if (meeting.meetingType != "group" && meeting.meetingType != "round_robin") {
         return; // Only applies to group and round robin meetings
     }
