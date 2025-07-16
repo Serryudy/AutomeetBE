@@ -72,7 +72,7 @@ map<string> connectionUsers = {};
 //JWT validation configurations
 configurable string jwtIssuer = "automeet";
 configurable string jwtAudience = "automeet-app";
-configurable string jwtSigningKey = "dummy";
+configurable string jwtSigningKey = ?;
 
 // Create the WebSocket listener
 listener websocket:Listener chatListener = new(9090);
@@ -1014,7 +1014,7 @@ function validateAndGetUsernameFromToken(string token) returns string|error {
         issuer: jwtIssuer,
         audience: jwtAudience,
         signatureConfig: {
-            secret: jwtSigningKey
+            secret: JWT_SECRET  // Use JWT_SECRET instead of jwtSigningKey
         }
     };
     
