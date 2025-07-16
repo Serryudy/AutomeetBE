@@ -162,21 +162,70 @@ service /api/users on ln {
 
     // get user with username given 
     resource function get [string usernameParam](http:Request req) returns User|ErrorResponse|error {
-        // Extract username from cookie for authorization
-        string? requestingUsername = check validateAndGetUsernameFromCookie(req);
-        if requestingUsername is () {
-            return {
-                message: "Unauthorized: Invalid or missing authentication token",
-                statusCode: 401
+        if hasAuthorizationHeader(req){
+            // Extract username from cookie for authorization
+            string? requestingUsername = check validateAndGetUsernameFromCookie(req);
+            if requestingUsername is () {
+                return {
+                    message: "Unauthorized: Invalid or missing authentication token",
+                    statusCode: 401
+                };
+            }
+        // Create a filter to find the requested user
+            map<json> filter = {
+                "username": usernameParam
             };
-        }
+        // Query the user without specifying the return type
+            record {}|() userRecord = check mongodb:userCollection->findOne(filter);
+            if userRecord is () {
+                return {
+                    message: "User not found",
+                    statusCode: 404
+                };
+            }
+            
+            // Convert to User type
+            json userJson = userRecord.toJson();
+            User user = check userJson.cloneWithType(User);
+            // If not admin and not the same user, only return basic user profile info
+            if requestingUsername != usernameParam && !user.isadmin {
+                // Create a new User object with limited fields
+                // Keep the required structure by creating a new User object
+                User limitedUser = {
+                    username: user.username,
+                    name: user.name,
+                    password: "", // Required field but set to empty
+                    profile_pic: user.profile_pic,
+                    bio: user.bio,
+                    industry: user.industry,
+                    company: user.company,
+                    is_available: user.is_available,
+                    calendar_connected: user.calendar_connected,
+                    isadmin: false, // Set default values for other fields
+                    role: "",
+                    phone_number: "",
+                    googleid: "",
+                    mobile_no: "",
+                    time_zone: "",
+                    social_media: "",
+                    refresh_token: "",
+                    email_refresh_token: ""
+                };
+                
+                return limitedUser;
+            }
         
+        // Remove sensitive information
+        user.password = "";
+        
+        // Return the full user record to the requesting user or admin
+        return user;
+        }
         // Create a filter to find the requested user
         map<json> filter = {
             "username": usernameParam
         };
-        
-        // Get user data
+        // Query the user without specifying the return type
         record {}|() userRecord = check mongodb:userCollection->findOne(filter);
         if userRecord is () {
             return {
@@ -188,40 +237,13 @@ service /api/users on ln {
         // Convert to User type
         json userJson = userRecord.toJson();
         User user = check userJson.cloneWithType(User);
-        
+            
         // Remove sensitive information
         user.password = "";
         
-        // If not admin and not the same user, only return basic user profile info
-        if requestingUsername != usernameParam && !user.isadmin {
-            // Create a new User object with limited fields
-            // Keep the required structure by creating a new User object
-            User limitedUser = {
-                username: user.username,
-                name: user.name,
-                password: "", // Required field but set to empty
-                profile_pic: user.profile_pic,
-                bio: user.bio,
-                industry: user.industry,
-                company: user.company,
-                is_available: user.is_available,
-                calendar_connected: user.calendar_connected,
-                isadmin: false, // Set default values for other fields
-                role: "",
-                phone_number: "",
-                googleid: "",
-                mobile_no: "",
-                time_zone: "",
-                social_media: "",
-                refresh_token: "",
-                email_refresh_token: ""
-            };
-            
-            return limitedUser;
-        }
-        
         // Return the full user record to the requesting user or admin
         return user;
+        
     }
 
     resource function get profile(http:Request req) returns User|ErrorResponse|error {
@@ -326,6 +348,71 @@ service /api/users on ln {
             };
 
         return users;
+    }
+
+    // delete user account
+    resource function delete delete(http:Request req) returns http:Ok|ErrorResponse|error {
+        // Extract username from cookie
+        string? username = check validateAndGetUsernameFromCookie(req);
+        if username is () {
+            return {
+                message: "Unauthorized: Invalid or missing authentication token",
+                statusCode: 401
+            };
+        }
+        
+        // Create filter to find the user
+        map<json> userFilter = {
+            "username": username
+        };
+        
+        // First check if user exists
+        record {}|() userRecord = check mongodb:userCollection->findOne(userFilter);
+        if userRecord is () {
+            return {
+                message: "User not found",
+                statusCode: 404
+            };
+        }
+        
+        // Delete associated data first
+        // 1. Delete user's meetings
+        map<json> meetingFilter = {
+            "createdBy": username
+        };
+        _ = check mongodb:meetingCollection->deleteMany(meetingFilter);
+        
+        // 2. Delete user's availability data
+        map<json> availabilityFilter = {
+            "username": username
+        };
+        _ = check mongodb:availabilityCollection->deleteMany(availabilityFilter);
+        
+        // 3. Delete user's notifications
+        map<json> notificationFilter = {
+            "toWhom": username
+        };
+        _ = check mongodb:notificationCollection->deleteMany(notificationFilter);
+        
+        // 4. Delete user's notification settings
+        map<json> settingsFilter = {
+            "username": username
+        };
+        _ = check mongodb:notificationSettingsCollection->deleteMany(settingsFilter);
+        
+        // 5. Delete user's contacts
+        map<json> contactFilter = {
+            "$or": [
+                {"username": username},
+                {"contactUsername": username}
+            ]
+        };
+        _ = check mongodb:contactCollection->deleteMany(contactFilter);
+        
+        // Finally delete the user account
+        _ = check mongodb:userCollection->deleteOne(userFilter);
+        
+        return http:OK;
     }
     
 }
