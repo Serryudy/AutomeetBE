@@ -36,6 +36,7 @@ public mongodb:Collection noteCollection = getCollectionRef("notes");
 public mongodb:Collection availabilityNotificationStatusCollection = getCollectionRef("availability_notification_status");
 public mongodb:Collection externalUserMappingCollection = getCollectionRef("externalUserMappings");
 public final mongodb:Collection aiReportCollection =  getCollectionRef("aiReports");
+
 // Initialize MongoDB client - handles the error internally
 function initMongoDbClient() returns mongodb:Client {
     mongodb:Client|error dbclient = new ({

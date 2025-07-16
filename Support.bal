@@ -1175,6 +1175,7 @@ public function generateJwtToken(User user) returns string|error {
     return token;
 }
 
+
 public function hasAuthorizationHeader(http:Request req) returns boolean {
     return req.hasHeader("Authorization");
 }
@@ -1533,3 +1534,4 @@ public function createMeetingNotificationWithMixedParticipants(
         createdAt: time:utcToString(time:utcNow())
     };
 }
+
