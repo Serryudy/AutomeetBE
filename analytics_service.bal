@@ -1,12 +1,10 @@
 import ballerina/http;
-import ballerina/log;
 import ballerina/uuid;
 import mongodb_atlas_app.mongodb;
 import ballerina/time;
-import ballerina/jwt;
-import ballerina/random;
+import ballerina/log;
 
-
+configurable string hfApiKey = ?;
 
 @http:ServiceConfig {
     cors: {
@@ -17,12 +15,14 @@ import ballerina/random;
         maxAge: 84900
     }
 }
+
+
 service /api/analytics on ln {
     
     // Create a new transcript - Explicitly specify ErrorResponse as the error type
     resource function post transcripts(http:Request req) returns Transcript|http:Response|error {
         // Extract username from cookie for authentication
-        string? username = check self.validateAndGetUsernameFromCookie(req);
+        string? username = check validateAndGetUsernameFromCookie(req);
         if username is () {
             http:Response response = new;
             response.statusCode = 401;
@@ -173,7 +173,7 @@ service /api/analytics on ln {
     // Get transcript by meeting ID
     resource function get transcripts/[string meetingId](http:Request req) returns Transcript|http:Response|error {
         // Extract username from cookie for authentication
-        string? username = check self.validateAndGetUsernameFromCookie(req);
+        string? username = check validateAndGetUsernameFromCookie(req);
         if username is () {
             http:Response response = new;
             response.statusCode = 401;
@@ -269,7 +269,7 @@ service /api/analytics on ln {
     // Get all transcripts for user's meetings
     resource function get transcripts(http:Request req) returns Transcript[]|http:Response|error {
         // Extract username from cookie for authentication
-        string? username = check self.validateAndGetUsernameFromCookie(req);
+        string? username = check validateAndGetUsernameFromCookie(req);
         if username is () {
             http:Response response = new;
             response.statusCode = 401;
@@ -330,7 +330,7 @@ service /api/analytics on ln {
     // Update a transcript
     resource function put transcripts/[string transcriptId](http:Request req) returns Transcript|http:Response|error {
         // Extract username from cookie for authentication
-        string? username = check self.validateAndGetUsernameFromCookie(req);
+        string? username = check validateAndGetUsernameFromCookie(req);
         if username is () {
             http:Response response = new;
             response.statusCode = 401;
@@ -482,7 +482,7 @@ service /api/analytics on ln {
     // Delete a transcript
     resource function delete transcripts/[string transcriptId](http:Request req) returns json|http:Response|error {
         // Extract username from cookie for authentication
-        string? username = check self.validateAndGetUsernameFromCookie(req);
+        string? username = check validateAndGetUsernameFromCookie(req);
         if username is () {
             http:Response response = new;
             response.statusCode = 401;
@@ -556,29 +556,12 @@ service /api/analytics on ln {
         };
     }
     
-    // New endpoint to get the standard meeting questions
-    resource function get standard/questions() returns json|error {
-        // Return the 10 standard questions
-        return {
-            "questions": [
-                "What was the purpose of the meeting?",
-                "What was the primary agenda of the meeting?",
-                "Around how many participants actually contributed?",
-                "Was the agenda fully covered? (Yes/No)",
-                "If not, what topics were left out and why?",
-                "Was the meeting conducted within the scheduled time? (Yes/No)",
-                "If not, by how much time did it exceed or finish early?",
-                "What were the key decisions made?",
-                "Were there any unresolved issues?",
-                "Did participants express satisfaction or dissatisfaction with the meeting's outcomes?"
-            ]
-        };
-    }
+    
 
     // Analytics endpoint
     resource function get meetings/[string meetingId]/analytics(http:Request req) returns MeetingAnalytics|ErrorResponse|error {
         // Extract username from cookie
-        string? username = check self.validateAndGetUsernameFromCookie(req);
+        string? username = check validateAndGetUsernameFromCookie(req);
         if username is () {
             return {
                 message: "Unauthorized: Invalid or missing authentication token",
@@ -619,29 +602,100 @@ service /api/analytics on ln {
     // Helper function to generate meeting analytics
     function generateMeetingAnalytics(Meeting meeting) returns MeetingAnalytics|error {
         string[] daysOfWeek = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-        
+        string currentTime = time:utcToString(time:utcNow());
+
         // Get rescheduling frequency
         DayFrequency[] reschedulingFreq = check self.calculateReschedulingFrequency(meeting.title);
+
+        // Scheduling accuracy logic
+        AccuracyMetric[]|string schedulingAccuracy;
+        AccuracyMetric[] accuracyMetrics = [];
         
-        // Generate scheduling accuracy with random values
-        AccuracyMetric[] schedulingAccuracy = [];
-        foreach string day in daysOfWeek {
-            float randomAccuracy = random:createDecimal() * 0.5 + 0.5; // Random value between 0.5 and 1.0
-            schedulingAccuracy.push({
-                day: day,
-                accuracy: self.roundTo2Decimals(randomAccuracy)
-            });
+        if meeting.meetingType == "direct" {
+            schedulingAccuracy = "not enough data";
+        } else {
+            // For group/round_robin, check if directTimeSlot exists
+            if meeting?.directTimeSlot is TimeSlot {
+                // TimeSlot confirmedSlot = meeting?.directTimeSlot ?: {startTime: "", endTime: ""};
+
+                // Gather all availabilities for this meeting
+                map<json> availFilter = { "meetingId": meeting.id };
+                stream<record {}, error?> availCursor = check mongodb:availabilityCollection->find(availFilter);
+                TimeSlot[] allSlots = [];
+
+                check from record {} availData in availCursor
+                    do {
+                        json availJson = availData.toJson();
+                        Availability avail = check availJson.cloneWithType(Availability);
+                        allSlots = [...allSlots, ...avail.timeSlots];
+                    };
+
+                // Also gather participant availabilities
+                stream<record {}, error?> partAvailCursor = check mongodb:participantAvailabilityCollection->find(availFilter);
+                check from record {} partAvailData in partAvailCursor
+                    do {
+                        json partAvailJson = partAvailData.toJson();
+                        ParticipantAvailability partAvail = check partAvailJson.cloneWithType(ParticipantAvailability);
+                        allSlots = [...allSlots, ...partAvail.timeSlots];
+                    };
+
+                // Count how many slots fall on each day of the week
+                map<int> dayCounts = {};
+                foreach string day in daysOfWeek {
+                    dayCounts[day] = 0;
+                }
+                
+                foreach TimeSlot slot in allSlots {
+                    time:Civil|error civil = time:civilFromString(slot.startTime);
+                    if civil is time:Civil {
+                        time:DayOfWeek? dow = civil.dayOfWeek;
+                        if dow is time:DayOfWeek {
+                            int idx = dow - 1;
+                            if idx >= 0 && idx < daysOfWeek.length() {
+                                string day = daysOfWeek[idx];
+                                dayCounts[day] = (dayCounts[day] ?: 0) + 1;
+                            }
+                        }
+                    }
+                }
+
+                // Find the best suited day (most available slots)
+                int maxCount = 0;
+                foreach string day in daysOfWeek {
+                    int currentCount = dayCounts[day] ?: 0;
+                    if currentCount > maxCount {
+                        maxCount = currentCount;
+                    }
+                }
+
+                // Assign a value between 0 and 1 for each day (relative to best day)
+                foreach string day in daysOfWeek {
+                    float value = maxCount > 0 ? (<float>(dayCounts[day] ?: 0)) / (<float>maxCount) : 0.0;
+                    accuracyMetrics.push({
+                        day: day,
+                        accuracy: self.roundTo2Decimals(value)
+                    });
+                }
+                schedulingAccuracy = accuracyMetrics;
+            } else {
+                schedulingAccuracy = "not enough data";
+            }
         }
+
+        // Get engagement metrics
+        EngagementMetrics|string engagementResult = check self.getEngagementMetricsFromTranscript(meeting.id);
         
-        // Generate random engagement metrics
-        EngagementMetrics engagement = {
-            speakingTime: self.roundTo2Decimals(random:createDecimal() * 100),
-            participantEngagement: self.roundTo2Decimals(random:createDecimal() * 100),
-            chatEngagement: self.roundTo2Decimals(random:createDecimal() * 100)
-        };
-        
-        string currentTime = time:utcToString(time:utcNow());
-        
+        EngagementMetrics engagement;
+        if engagementResult is string {
+            engagement = {
+                speakingTime: 0.0,
+                participantEngagement: 0.0,
+                chatEngagement: 0.0
+            };
+        } else {
+            engagement = engagementResult;
+        }
+
         return {
             meetingId: meeting.id,
             reschedulingFrequency: reschedulingFreq,
@@ -650,6 +704,48 @@ service /api/analytics on ln {
             createdAt: currentTime,
             updatedAt: currentTime
         };
+    }
+
+    function getEngagementMetricsFromTranscript(string meetingId) returns string|EngagementMetrics|error {
+        // Find the transcript for this meeting
+        map<json> transcriptFilter = { "meetingId": meetingId };
+        record {}|() transcriptRecord = checkpanic mongodb:transcriptCollection->findOne(transcriptFilter);
+
+        if transcriptRecord is () {
+            return "not enough data";
+        }
+
+        json transcriptJson = transcriptRecord.toJson();
+        Transcript transcript = checkpanic transcriptJson.cloneWithType(Transcript);
+
+        float? speakingTime = ();
+        float? participantEngagement = ();
+        float? chatEngagement = ();
+
+        // Extract metrics from questionAnswers
+        foreach QuestionAnswer qa in transcript.questionAnswers {
+            match qa.question {
+                "speaking time" => {
+                    speakingTime = check float:fromString(qa.answer);
+                }
+                "participant engagement" => {
+                    participantEngagement = check float:fromString(qa.answer);
+                }
+                "chat engagement" => {
+                    chatEngagement = check float:fromString(qa.answer);
+                }
+            }
+        }
+
+        if speakingTime is float && participantEngagement is float && chatEngagement is float {
+            return {
+                speakingTime: self.roundTo2Decimals(speakingTime),
+                participantEngagement: self.roundTo2Decimals(participantEngagement),
+                chatEngagement: self.roundTo2Decimals(chatEngagement)
+            };
+        }
+        
+        return "not enough data";
     }
 
     // Helper function to calculate rescheduling frequency
@@ -740,9 +836,41 @@ service /api/analytics on ln {
         return false;
     }
 
-    resource function post transcripts/[string meetingId]/generatereport(http:Request req) returns json|http:Response|error {
-        // Authentication (same as your other endpoints)
-        string? username = check self.validateAndGetUsernameFromCookie(req);
+    // Helper function to check user permissions for meeting
+    function checkUserPermissionForMeeting(string username, map<json> meetingData) returns boolean {
+        // Check if user is the creator
+        if meetingData.hasKey("createdBy") && meetingData["createdBy"].toString() == username {
+            return true;
+        }
+        
+        // Check if user is a participant
+        if meetingData.hasKey("participants") {
+            json[] participantsJson = <json[]>meetingData["participants"];
+            foreach json participantJson in participantsJson {
+                map<json> participant = <map<json>>participantJson;
+                if participant.hasKey("username") && participant["username"].toString() == username {
+                    return true;
+                }
+            }
+        }
+        
+        // Check if user is a host
+        if meetingData.hasKey("hosts") {
+            json[] hostsJson = <json[]>meetingData["hosts"];
+            foreach json hostJson in hostsJson {
+                map<json> host = <map<json>>hostJson;
+                if host.hasKey("username") && host["username"].toString() == username {
+                    return true;
+                }
+            }
+        }
+        
+        return false;
+    }
+
+    resource function post transcripts/[string meetingId]/generateai(http:Request req) returns AIReport|http:Response|error {
+        // Authentication
+        string? username = check validateAndGetUsernameFromCookie(req);
         if username is () {
             http:Response response = new;
             response.statusCode = 401;
@@ -771,43 +899,12 @@ service /api/analytics on ln {
         json meetingJson = meeting.toJson();
         map<json> meetingData = <map<json>>meetingJson;
         
-        // Verify user permissions (similar to other endpoints)
-        boolean hasPermission = false;
-        
-        // Check if user is the creator
-        if meetingData.hasKey("createdBy") && meetingData["createdBy"].toString() == username {
-            hasPermission = true;
-        } else {
-            // Check if user is a participant
-            if meetingData.hasKey("participants") {
-                json[] participantsJson = <json[]>meetingData["participants"];
-                foreach json participantJson in participantsJson {
-                    map<json> participant = <map<json>>participantJson;
-                    if participant.hasKey("username") && participant["username"].toString() == username {
-                        hasPermission = true;
-                        break;
-                    }
-                }
-            }
-            
-            // Check if user is a host
-            if !hasPermission && meetingData.hasKey("hosts") {
-                json[] hostsJson = <json[]>meetingData["hosts"];
-                foreach json hostJson in hostsJson {
-                    map<json> host = <map<json>>hostJson;
-                    if host.hasKey("username") && host["username"].toString() == username {
-                        hasPermission = true;
-                        break;
-                    }
-                }
-            }
-        }
-        
+        boolean hasPermission = self.checkUserPermissionForMeeting(username, meetingData);
         if !hasPermission {
             http:Response response = new;
             response.statusCode = 403;
             response.setJsonPayload({
-                message: "Unauthorized: You don't have permission to generate a report for this meeting"
+                message: "Unauthorized: You don't have permission to generate AI report for this meeting"
             });
             return response;
         }
@@ -822,247 +919,371 @@ service /api/analytics on ln {
             http:Response response = new;
             response.statusCode = 404;
             response.setJsonPayload({
-                message: "Transcript not found for this meeting"
+                message: "Transcript not found for this meeting. Please create a transcript first."
             });
             return response;
         }
         
-        // Convert records to JSON
         json transcriptJson = transcriptRecord.toJson();
+        Transcript transcript = check transcriptJson.cloneWithType(Transcript);
         
-        // Prepare the report request payload
-        json reportRequest = {
-            "meeting": {
-                "name": meetingData.hasKey("name") ? meetingData["name"].toString() : "Untitled Meeting",
-                "date": meetingData.hasKey("scheduledDate") ? meetingData["scheduledDate"].toString() : 
-                        (meetingData.hasKey("createdAt") ? meetingData["createdAt"].toString() : "N/A"),
-                "time": meetingData.hasKey("scheduledTime") ? meetingData["scheduledTime"].toString() : "N/A",
-                "location": meetingData.hasKey("location") ? meetingData["location"].toString() : "N/A",
-                // Include additional meeting details that might be useful
-                "createdBy": meetingData.hasKey("createdBy") ? meetingData["createdBy"].toString() : "N/A"
-            },
-            "transcript": transcriptJson
+        // Check if AI report already exists
+        map<json> reportFilter = {
+            "meetingId": meetingId
         };
         
-        // Create HTTP client to call the report generator API
-        http:Client reportClient = check new("http://localhost:8082");  // Update URL if deployed elsewhere
+        record {}|() existingReport = check mongodb:aiReportCollection->findOne(reportFilter);
         
-        // Call the report generator API
-        http:Response|error reportResponse = reportClient->post("/api/generate-report", reportRequest);
+        // Generate AI report content
+        string reportContent = check self.generateAIReport(transcript, meetingData);
         
-        if reportResponse is error {
-            http:Response response = new;
-            response.statusCode = 500;
-            response.setJsonPayload({
-                message: "Failed to generate report: " + reportResponse.message()
-            });
-            return response;
-        }
+        string currentTime = time:utcToString(time:utcNow());
         
-        // Return the API response
-        json|http:ClientError responsePayload = reportResponse.getJsonPayload();
-        if responsePayload is http:ClientError {
-            http:Response response = new;
-            response.statusCode = 500;
-            response.setJsonPayload({
-                message: "Failed to parse report response"
-            });
-            return response;
-        }
-        
-        return responsePayload;
-    }
-    
-    // Helper function to validate JWT token from cookie
-    function validateAndGetUsernameFromCookie(http:Request request) returns string?|error {
-        // Try to get the auth_token cookie
-        http:Cookie[] cookies = request.getCookies();
-        string? token = ();
-        
-        foreach http:Cookie cookie in cookies {
-            if cookie.name == "auth_token" {
-                token = cookie.value;
-                break;
-            }
-        }
-        
-        // If no auth cookie found, check for Authorization header as fallback
-        if token is () {
-            string|http:HeaderNotFoundError authHeader = request.getHeader("Authorization");
+        if existingReport is record {} {
+            // Update existing report
+            json existingJson = existingReport.toJson();
+            AIReport existing = check existingJson.cloneWithType(AIReport);
             
-            if authHeader is string && authHeader.startsWith("Bearer ") {
-                token = authHeader.substring(7);
-            } else {
-                log:printError("No authentication token found in cookies or headers");
-                return ();
-            }
+            mongodb:Update updateDoc = {
+                "set": {
+                    "reportContent": reportContent,
+                    "generatedBy": username,
+                    "updatedAt": currentTime
+                }
+            };
+            
+            _ = check mongodb:aiReportCollection->updateOne(reportFilter, updateDoc);
+            
+            existing.reportContent = reportContent;
+            existing.generatedBy = username;
+            existing.updatedAt = currentTime;
+            return existing;
+        } else {
+            // Create new report
+            AIReport newReport = {
+                id: uuid:createType1AsString(),
+                meetingId: meetingId,
+                reportContent: reportContent,
+                generatedBy: username,
+                createdAt: currentTime,
+                updatedAt: currentTime
+            };
+            
+            _ = check mongodb:aiReportCollection->insertOne(newReport);
+            return newReport;
         }
-        
-        // Use the same JWT_SECRET as in the main service
-        final string & readonly JWT_SECRET = "dummy";
-        
-        // Validate the JWT token
-        jwt:ValidatorConfig validatorConfig = {
-            issuer: "automeet",
-            audience: "automeet-app",
-            clockSkew: 60,
-            signatureConfig: {
-                secret: JWT_SECRET    // For HMAC based JWT
-            }
-        };
-        
-        jwt:Payload|error validationResult = jwt:validate(token, validatorConfig);
-        
-        if (validationResult is error) {
-            log:printError("JWT validation failed", validationResult);
-            return ();
-        }
-        
-        jwt:Payload payload = validationResult;
-        
-        // First check if the username might be in the subject field
-        if (payload.sub is string) {
-            return payload.sub;
-        }
-        
-        // Direct access to claim using index accessor
-        var customClaims = payload["customClaims"];
-        if (customClaims is map<json>) {
-            var username = customClaims["username"];
-            if (username is string) {
-                return username;
-            }
-        }
-        
-        // Try to access username directly as a rest field
-        var username = payload["username"];
-        if (username is string) {
-            return username;
-        }
-        
-        log:printError("Username not found in JWT token");
-        return ();
     }
 
-    resource function get users/analytics(http:Request req) returns UserAnalytics|ErrorResponse|error {
-        // Extract username from cookie
-        string? username = check self.validateAndGetUsernameFromCookie(req);
+    // Get AI report for a meeting
+    resource function get reports/[string meetingId](http:Request req) returns AIReport|http:Response|error {
+        // Authentication
+        string? username = check validateAndGetUsernameFromCookie(req);
         if username is () {
-            return {
-                message: "Unauthorized: Invalid or missing authentication token",
-                statusCode: 401
-            };
+            http:Response response = new;
+            response.statusCode = 401;
+            response.setJsonPayload({
+                message: "Unauthorized: Invalid or missing authentication token"
+            });
+            return response;
         }
-
-        // Generate analytics components
-        AvailabilityStats availStats = check self.calculateUserAvailability(username);
-        ParticipationStats partStats = self.calculateUserParticipation();
-        MeetingFrequency[] meetingFreq = check self.calculateUserMeetingFrequency(username);
-
-        // Create the analytics response
-        UserAnalytics analytics = {
-            username: username,
-            availability: availStats,
-            participation: partStats,
-            meetingFrequency: meetingFreq,
-            generatedAt: time:utcToString(time:utcNow())
+        
+        // Check if the meeting exists and user has permission
+        map<json> meetingFilter = {
+            "id": meetingId
         };
-
-        return analytics;
-    }
-
-    // Helper function to calculate user availability statistics
-    function calculateUserAvailability(string username) returns AvailabilityStats|error {
-        // Get user's availability records
-        map<json> filter = {
-            "username": username
-        };
-
-        stream<record {}, error?> availCursor = check mongodb:availabilityCollection->find(filter);
-        int availableCount = 0;
-        int totalSlots = 0;
-
-        // Process availability records
-        check from record {} availData in availCursor
-            do {
-                json availJson = availData.toJson();
-                Availability avail = check availJson.cloneWithType(Availability);
-                
-                // Count total slots and available slots
-                totalSlots += avail.timeSlots.length();
-                availableCount += avail.timeSlots.length();
-            };
-
-        // Calculate percentages
-        float available = totalSlots > 0 ? (availableCount * 60.0) / totalSlots : 60.0;
-        float unavailable = 30.0; // Fixed value as per requirement
-        float tendency = 10.0; // Fixed value as per requirement
-
-        return {
-            available: self.roundTo2Decimals(available),
-            unavailable: self.roundTo2Decimals(unavailable),
-            tendency: self.roundTo2Decimals(tendency)
-        };
-    }
-
-    // Helper function to generate random participation stats
-    function calculateUserParticipation() returns ParticipationStats {
-        float randomParticipation = random:createDecimal() * 100;
-        return {
-            participationRate: self.roundTo2Decimals(randomParticipation)
-        };
-    }
-
-    // Helper function to calculate user's meeting frequency
-    function calculateUserMeetingFrequency(string username) returns MeetingFrequency[]|error {
-        string[] daysOfWeek = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-        map<int> dayCountMap = {};
-
-        // Initialize counts for all days
-        foreach string day in daysOfWeek {
-            dayCountMap[day] = 0;
+        
+        record {}|() meeting = check mongodb:meetingCollection->findOne(meetingFilter);
+        if meeting is () {
+            http:Response response = new;
+            response.statusCode = 404;
+            response.setJsonPayload({
+                message: "Meeting not found"
+            });
+            return response;
         }
+        
+        json meetingJson = meeting.toJson();
+        map<json> meetingData = <map<json>>meetingJson;
+        
+        boolean hasPermission = self.checkUserPermissionForMeeting(username, meetingData);
+        if !hasPermission {
+            http:Response response = new;
+            response.statusCode = 403;
+            response.setJsonPayload({
+                message: "Unauthorized: You don't have permission to view this meeting's AI report"
+            });
+            return response;
+        }
+        
+        // Get the AI report
+        map<json> reportFilter = {
+            "meetingId": meetingId
+        };
+        
+        record {}|() reportRecord = check mongodb:aiReportCollection->findOne(reportFilter);
+        if reportRecord is () {
+            http:Response response = new;
+            response.statusCode = 404;
+            response.setJsonPayload({
+                message: "AI report not found for this meeting. Please generate a report first."
+            });
+            return response;
+        }
+        
+        json reportJson = reportRecord.toJson();
+        AIReport report = check reportJson.cloneWithType(AIReport);
+        
+        return report;
+    }
 
-        // Find meetings where user is creator, participant, or host
-        map<json> filter = {
+    // Get all AI reports for user's meetings
+    resource function get reports(http:Request req) returns AIReport[]|http:Response|error {
+        // Authentication
+        string? username = check validateAndGetUsernameFromCookie(req);
+        if username is () {
+            http:Response response = new;
+            response.statusCode = 401;
+            response.setJsonPayload({
+                message: "Unauthorized: Invalid or missing authentication token"
+            });
+            return response;
+        }
+        
+        // Get all meetings where user has access
+        map<json> meetingFilter = {
             "$or": [
                 {"createdBy": username},
                 {"participants.username": username},
                 {"hosts.username": username}
             ]
         };
-
-        stream<record {}, error?> meetingCursor = check mongodb:meetingCollection->find(filter);
-
-        // Process meetings
-        check from record {} meetingData in meetingCursor
+        
+        stream<record {}, error?> meetingsCursor = check mongodb:meetingCollection->find(meetingFilter);
+        string[] meetingIds = [];
+        
+        check from record {} meetingData in meetingsCursor
             do {
                 json meetingJson = meetingData.toJson();
-                Meeting meeting = check meetingJson.cloneWithType(Meeting);
-                
-                // Extract day of week from meeting's time slot
-                if meeting?.directTimeSlot is TimeSlot {
-                    TimeSlot timeSlot = <TimeSlot>meeting?.directTimeSlot;
-                    time:Civil|error dateTime = time:civilFromString(timeSlot.startTime);
-                    if dateTime is time:Civil {
-                        time:DayOfWeek? dayOfWeekOpt = dateTime.dayOfWeek;
-                        if dayOfWeekOpt is time:DayOfWeek {
-                            string day = daysOfWeek[dayOfWeekOpt - 1];
-                        dayCountMap[day] = (dayCountMap[day] ?: 0) + 1;
+                map<json> meetingMap = <map<json>>meetingJson;
+                if meetingMap.hasKey("id") {
+                    meetingIds.push(meetingMap["id"].toString());
+                }
+            };
+        
+        if meetingIds.length() == 0 {
+            return [];
+        }
+        
+        // Get AI reports for these meetings
+        map<json> reportFilter = {
+            "meetingId": {
+                "$in": meetingIds
+            }
+        };
+        
+        stream<record {}, error?> reportsCursor = check mongodb:aiReportCollection->find(reportFilter);
+        AIReport[] reports = [];
+        
+        check from record {} reportData in reportsCursor
+            do {
+                json reportJson = reportData.toJson();
+                AIReport report = check reportJson.cloneWithType(AIReport);
+                reports.push(report);
+            };
+        
+        return reports;
+    }
+
+
+    // Helper function to generate AI report using Hugging Face
+    function generateAIReport(Transcript transcript, map<json> meetingData) returns string|error {
+        // Build the prompt from transcript answers
+        string promptBuilder = "Meeting Analysis:\n\n";
+        promptBuilder += "Title: " + (meetingData.hasKey("title") ? meetingData["title"].toString() : "N/A") + "\n";
+        promptBuilder += "Type: " + (meetingData.hasKey("meetingType") ? meetingData["meetingType"].toString() : "N/A") + "\n";
+        promptBuilder += "Location: " + (meetingData.hasKey("location") ? meetingData["location"].toString() : "N/A") + "\n\n";
+        
+        promptBuilder += "Responses:\n";
+        
+        foreach QuestionAnswer qa in transcript.questionAnswers {
+            promptBuilder += "Q: " + qa.question + "\n";
+            promptBuilder += "A: " + qa.answer + "\n\n";
+        }
+        
+        promptBuilder += "Analyze this meeting and provide: assessment, achievements, improvements needed, and recommendations in 150-200 words.";
+        
+        // Try multiple approaches for better success rate
+        string|error result = self.tryHuggingFaceAPI(promptBuilder);
+        
+        if result is error {
+            log:printWarn("Hugging Face API failed, using fallback: " + result.message());
+            return self.generateFallbackReport(transcript, meetingData);
+        }
+        
+        return result;
+    }
+
+    // Primary Hugging Face API call with multiple model fallbacks
+    function tryHuggingFaceAPI(string prompt) returns string|error {
+
+        
+        // Try multiple free models for better success rate
+        string[] models = [
+            "microsoft/DialoGPT-medium",
+            "facebook/blenderbot-400M-distill",
+            "google/flan-t5-base",
+            "microsoft/DialoGPT-small"
+        ];
+        
+        foreach string model in models {
+            string|error result = self.callHuggingFaceModel(model, prompt, hfApiKey);
+            if result is string {
+                return result;
+            }
+            log:printInfo("Model " + model + " failed, trying next...");
+        }
+        
+        return error("All Hugging Face models failed");
+    }
+
+    // Call specific Hugging Face model
+    function callHuggingFaceModel(string modelName, string prompt, string apiKey) returns string|error {
+        // Create HTTP client for Hugging Face
+        http:Client hfClient = check new("https://api-inference.huggingface.co", {
+            timeout: 30
+        });
+        
+        // Prepare request payload
+        HuggingFaceRequest hfRequest = {
+            inputs: prompt,
+            parameters: {
+                max_length: 300,
+                temperature: 0.7,
+                do_sample: true,
+                top_p: 0.9
+            }
+        };
+        
+        // Prepare headers
+        map<string|string[]> headers = {
+            "Authorization": "Bearer " + apiKey,
+            "Content-Type": "application/json"
+        };
+        
+        string endpoint = "/models/" + modelName;
+        
+        // Make API call
+        http:Response|error response = hfClient->post(endpoint, hfRequest, headers);
+        
+        if response is error {
+            return error("HTTP call failed: " + response.message());
+        }
+        
+        if response.statusCode == 503 {
+            return error("Model loading, try again in 30 seconds");
+        }
+        
+        if response.statusCode == 429 {
+            return error("Rate limit exceeded");
+        }
+        
+        if response.statusCode != 200 {
+            return error("API returned status: " + response.statusCode.toString());
+        }
+        
+        // Parse response
+        json|http:ClientError responsePayload = response.getJsonPayload();
+        if responsePayload is http:ClientError {
+            return error("Failed to parse response");
+        }
+        
+        // Handle different response formats
+        if responsePayload is json[] {
+            if responsePayload.length() > 0 {
+                json firstResult = responsePayload[0];
+                if firstResult is map<json> {
+                    map<json> resultMap = <map<json>>firstResult;
+                    if resultMap.hasKey("generated_text") {
+                        return resultMap["generated_text"].toString();
+                    }
+                    if resultMap.hasKey("text") {
+                        return resultMap["text"].toString();
                     }
                 }
             }
-            };
-
-        // Convert map to array of MeetingFrequency
-        MeetingFrequency[] frequencies = [];
-        foreach string day in daysOfWeek {
-            frequencies.push({
-                day: day,
-                count: dayCountMap[day] ?: 0
-            });
         }
-
-        return frequencies;
+        
+        return error("Unexpected response format");
     }
+
+    // Fallback report generator
+    function generateFallbackReport(Transcript transcript, map<json> meetingData) returns string {
+        string report = "Meeting Analysis Report\n\n";
+        report += "Meeting: " + (meetingData.hasKey("title") ? meetingData["title"].toString() : "Untitled") + "\n";
+        report += "Type: " + (meetingData.hasKey("meetingType") ? meetingData["meetingType"].toString() : "N/A") + "\n\n";
+        
+        // Extract key information from answers
+        string purpose = "";
+        string agenda = "";
+        string decisions = "";
+        string issues = "";
+        string timeManagement = "";
+        string participantCount = "";
+        
+        foreach QuestionAnswer qa in transcript.questionAnswers {
+            string question = qa.question.toLowerAscii();
+            
+            if question.includes("purpose") {
+                purpose = qa.answer;
+            } else if question.includes("agenda") {
+                agenda = qa.answer;
+            } else if question.includes("decisions") {
+                decisions = qa.answer;
+            } else if question.includes("unresolved") {
+                issues = qa.answer;
+            } else if question.includes("time") && question.includes("scheduled") {
+                timeManagement = qa.answer;
+            } else if question.includes("participants") && question.includes("contributed") {
+                participantCount = qa.answer;
+            }
+        }
+        
+        // Generate structured report
+        report += "Assessment:\n";
+        if purpose != "" {
+            report += "The meeting focused on: " + purpose + ". ";
+        }
+        if participantCount != "" {
+            report += "Participation level: " + participantCount + ". ";
+        }
+        
+        report += "\n\nKey Outcomes:\n";
+        if decisions != "" {
+            report += "Decisions made: " + decisions + ". ";
+        }
+        if agenda != "" {
+            report += "Agenda coverage: " + agenda + ". ";
+        }
+        
+        report += "\n\nAreas for Improvement:\n";
+        if timeManagement.toLowerAscii().includes("no") || timeManagement.includes("exceed") {
+            report += "Time management needs attention. ";
+        }
+        if issues != "" && !issues.toLowerAscii().includes("none") && !issues.toLowerAscii().includes("n/a") {
+            report += "Outstanding issues: " + issues + ". ";
+        }
+        
+        report += "\n\nRecommendations:\n";
+        report += "• Continue structured agenda approach\n";
+        report += "• Ensure all participants contribute actively\n";
+        report += "• Follow up on unresolved items\n";
+        if timeManagement.toLowerAscii().includes("no") {
+            report += "• Improve time management for future meetings\n";
+        }
+        
+        report += "\nNote: This analysis was generated from meeting transcript responses.";
+        
+        return report;
+    }
+
 }
