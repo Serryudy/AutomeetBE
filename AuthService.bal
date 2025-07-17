@@ -3,11 +3,12 @@ import ballerina/log;
 import ballerina/jwt;
 import ballerina/url;
 import ballerina/uuid;
+import ballerina/time;
 import mongodb_atlas_app.mongodb;
 
 @http:ServiceConfig {
     cors: {
-        allowOrigins: ["http://localhost:3000"],
+        allowOrigins: ["http://localhost:3000", "http://localhost:5173"],
         allowCredentials: true,
         allowHeaders: ["content-type", "authorization"],
         allowMethods: ["POST", "GET", "OPTIONS", "PUT", "DELETE"],
@@ -17,111 +18,116 @@ import mongodb_atlas_app.mongodb;
 
 service /api/auth on ln {
 
-    resource function post signup(http:Caller caller, http:Request req) returns error? {
-        // Parse the JSON payload from the request body
-        json signupPayload = check req.getJsonPayload();
-        
-        // Log redacted payload for security (we'll omit the password entirely)
-        log:printInfo("New signup request received for user: " + (signupPayload.username is string ? (check signupPayload.username).toString() : "unknown"));
-        
-        // Extract all possible fields from the frontend payload
-        string username = check signupPayload.username.ensureType();
-        string password = check signupPayload.password.ensureType();
-        
-        // Handle the name field - we'll look for it in the payload, but it might be missing
-        string name = "";
-        if (signupPayload.name is string) {
-            name = check signupPayload.name.ensureType();
-        }
-        
-        // Use defaults for other potentially missing fields
-        boolean isAdmin = false;
-        if (signupPayload.isadmin is boolean) {
-            isAdmin = check signupPayload.isadmin.ensureType();
-        }
-        
-        string role = "";
-        if (signupPayload.role is string) {
-            role = check signupPayload.role.ensureType();
-        }
-        
-        string phoneNumber = "";
-        if (signupPayload.phone_number is string) {
-            phoneNumber = check signupPayload.phone_number.ensureType();
-        }
-        
-        string profilePic = "";
-        if (signupPayload.profile_pic is string) {
-            profilePic = check signupPayload.profile_pic.ensureType();
-        }
-        
-        // Validate required fields
-        if (username == "" || password == "") {
-            log:printError("Missing required fields for signup");
-            http:Response badRequestResponse = new;
-            badRequestResponse.statusCode = 400; // Bad Request status code
-            badRequestResponse.setJsonPayload({"error": "Username and password are required fields"});
-            check caller->respond(badRequestResponse);
-            return;
-        }
-        
-        // If name is not provided, use username as name
-        if (name == "") {
-            name = username;
-        }
+   // REPLACE YOUR EXISTING signup ENDPOINT WITH THIS:
 
-        // Check if the user already exists in the collection using username field
-        map<json> filter = {"username": username};
-        stream<User, error?> userStream = check mongodb:userCollection->find(filter);
-        record {|User value;|}? existingUser = check userStream.next();
-        
-        if (existingUser is record {|User value;|}) {
-            log:printError("User already exists");
-            http:Response conflictResponse = new;
-            conflictResponse.statusCode = 409; // Conflict status code
-            conflictResponse.setJsonPayload({"error": "User already exists"});
-            check caller->respond(conflictResponse);
-            return;
-        }
-        
-        // Hash the password before storing
-        string hashedPassword = hashPassword(password);
-        
-        // Create a new User record with the extracted fields
-        User newUser = {
-            username: username,
-            name: name,
-            password: hashedPassword
-            // All other fields will use their default values
-        };
-        
-        // If there are additional fields in User type that we want to set
-        if (role != "") {
-            newUser.role = role;
-        }
-        
-        if (phoneNumber != "") {
-            newUser["phone_number"] = phoneNumber;
-        }
-        
-        if (profilePic != "") {
-            newUser["profile_pic"] = profilePic;
-        }
-        
-        // Set isAdmin if it's part of the User type
-        if (isAdmin) {
-            newUser["isadmin"] = isAdmin;
-        }
-        
-        // Insert the new user into the MongoDB collection
-        check mongodb:userCollection->insertOne(newUser);
-
-        // Send a success response
-        http:Response response = new;
-        response.statusCode = 201; // Created status code
-        response.setJsonPayload({"message": "User signed up successfully"});
-        check caller->respond(response);
+resource function post signup(http:Caller caller, http:Request req) returns error? {
+    // Parse the JSON payload from the request body
+    json signupPayload = check req.getJsonPayload();
+    
+    // Log redacted payload for security (we'll omit the password entirely)
+    log:printInfo("New signup request received for user: " + (signupPayload.username is string ? (check signupPayload.username).toString() : "unknown"));
+    
+    // Extract all possible fields from the frontend payload
+    string username = check signupPayload.username.ensureType();
+    string password = check signupPayload.password.ensureType();
+    
+    // Handle the name field - we'll look for it in the payload, but it might be missing
+    string name = "";
+    if (signupPayload.name is string) {
+        name = check signupPayload.name.ensureType();
     }
+    
+    // Use defaults for other potentially missing fields
+    boolean isAdmin = false;
+    if (signupPayload.isadmin is boolean) {
+        isAdmin = check signupPayload.isadmin.ensureType();
+    }
+    
+    string role = "";
+    if (signupPayload.role is string) {
+        role = check signupPayload.role.ensureType();
+    }
+    
+    string phoneNumber = "";
+    if (signupPayload.phone_number is string) {
+        phoneNumber = check signupPayload.phone_number.ensureType();
+    }
+    
+    string profilePic = "";
+    if (signupPayload.profile_pic is string) {
+        profilePic = check signupPayload.profile_pic.ensureType();
+    }
+    
+    // Validate required fields
+    if (username == "" || password == "") {
+        log:printError("Missing required fields for signup");
+        http:Response badRequestResponse = new;
+        badRequestResponse.statusCode = 400; // Bad Request status code
+        badRequestResponse.setJsonPayload({"error": "Username and password are required fields"});
+        check caller->respond(badRequestResponse);
+        return;
+    }
+    
+    // If name is not provided, use username as name
+    if (name == "") {
+        name = username;
+    }
+
+    // Check if the user already exists in the collection using username field
+    map<json> filter = {"username": username};
+    stream<User, error?> userStream = check mongodb:userCollection->find(filter);
+    record {|User value;|}? existingUser = check userStream.next();
+    
+    if (existingUser is record {|User value;|}) {
+        log:printError("User already exists");
+        http:Response conflictResponse = new;
+        conflictResponse.statusCode = 409; // Conflict status code
+        conflictResponse.setJsonPayload({"error": "User already exists"});
+        check caller->respond(conflictResponse);
+        return;
+    }
+    
+    // Hash the password before storing
+    string hashedPassword = hashPassword(password);
+    
+    // Create a new User record with the extracted fields
+    User newUser = {
+        username: username,
+        name: name,
+        password: hashedPassword
+        // All other fields will use their default values
+    };
+    
+    // If there are additional fields in User type that we want to set
+    if (role != "") {
+        newUser.role = role;
+    }
+    
+    if (phoneNumber != "") {
+        newUser["phone_number"] = phoneNumber;
+    }
+    
+    if (profilePic != "") {
+        newUser["profile_pic"] = profilePic;
+    }
+    
+    // Set isAdmin if it's part of the User type
+    if (isAdmin) {
+        newUser["isadmin"] = isAdmin;
+    }
+    
+    // Insert the new user into the MongoDB collection
+    check mongodb:userCollection->insertOne(newUser);
+
+    // ** NEW: Send welcome email for new registration **
+    sendWelcomeEmailAsync(username, name);
+
+    // Send a success response
+    http:Response response = new;
+    response.statusCode = 201; // Created status code
+    response.setJsonPayload({"message": "User signed up successfully"});
+    check caller->respond(response);
+}
     // Add to service.bal inside the service definition
     resource function get status(http:Request req) returns LoginResponse|ErrorResponse|error {
         // Extract username from cookie
@@ -163,92 +169,104 @@ service /api/auth on ln {
         return response;
     }
 
-    resource function post login(http:Caller caller, http:Request req) returns error? {
-        // Parse the JSON payload from the request body
-        json loginPayload = check req.getJsonPayload();
-        
-        // Log the login attempt without password
-        log:printInfo("Login attempt for user: " + (loginPayload.username is string ? (check loginPayload.username).toString() : "unknown"));
-        
-        // Convert JSON to LoginRequest type
-        LoginRequest loginDetails = check loginPayload.cloneWithType(LoginRequest);
-        
-        // First, find the user by username
-        map<json> usernameFilter = {"username": loginDetails.username};
-        stream<User, error?> userStream = check mongodb:userCollection->find(usernameFilter);
-        record {|User value;|}? userRecord = check userStream.next();
-        
-        if (userRecord is ()) {
-            log:printError("Invalid username or password");
-            http:Response unauthorizedResponse = new;
-            unauthorizedResponse.statusCode = 401; // Unauthorized status code
-            unauthorizedResponse.setJsonPayload({"error": "Invalid username or password"});
-            check caller->respond(unauthorizedResponse);
-            return;
-        }
-        
-        User user = userRecord.value;
-        
-        // Hash the provided password and compare with stored hash
-        string hashedInputPassword = hashPassword(loginDetails.password);
-        
-        if (hashedInputPassword != user.password) {
-            log:printError("Invalid username or password");
-            http:Response unauthorizedResponse = new;
-            unauthorizedResponse.statusCode = 401; // Unauthorized status code
-            unauthorizedResponse.setJsonPayload({"error": "Invalid username or password"});
-            check caller->respond(unauthorizedResponse);
-            return;
-        }
-        
-        // Generate a new refresh token
-        string refreshToken = uuid:createType1AsString();
-        
-        // Update the user record with the new refresh token
-        map<json> filter = {"username": user.username};
-        mongodb:Update updateOperation = {
-            "set": {"email_refresh_token": refreshToken}
-        };
-        _ = check mongodb:userCollection->updateOne(filter, updateOperation);
-        
-        // Generate JWT token 
-        string token = check generateJwtToken(user);
-        
-        // Create login response - no token in the response body
-        LoginResponse loginResponse = {
-            username: user.username,
-            name: user.name,
-            isadmin: user.isadmin,
-            role: user.role,
-            success: true,
-            calendar_connected: user.calendar_connected
-        };
+  // REPLACE YOUR EXISTING login ENDPOINT WITH THIS:
 
-        json loginResponseJson = loginResponse.toJson();
-        
-        // Send the response with the JWT token in HttpOnly secure cookie
-        http:Response response = new;
-        response.setJsonPayload(loginResponseJson);
-        
-            // Set the JWT token as an HttpOnly secure cookie
-            http:Cookie jwtCookie = new("auth_token", token, 
-                path = "/", 
-                httpOnly = true, 
-                secure = true,
-                maxAge = 3600 // 1 hour, matching the JWT expiration
-            );
+resource function post login(http:Caller caller, http:Request req) returns error? {
+    // Parse the JSON payload from the request body
+    json loginPayload = check req.getJsonPayload();
+    
+    // Log the login attempt without password
+    log:printInfo("Login attempt for user: " + (loginPayload.username is string ? (check loginPayload.username).toString() : "unknown"));
+    
+    // Convert JSON to LoginRequest type
+    LoginRequest loginDetails = check loginPayload.cloneWithType(LoginRequest);
+    
+    // First, find the user by username
+    map<json> usernameFilter = {"username": loginDetails.username};
+    stream<User, error?> userStream = check mongodb:userCollection->find(usernameFilter);
+    record {|User value;|}? userRecord = check userStream.next();
+    
+    if (userRecord is ()) {
+        log:printError("Invalid username or password");
+        http:Response unauthorizedResponse = new;
+        unauthorizedResponse.statusCode = 401; // Unauthorized status code
+        unauthorizedResponse.setJsonPayload({"error": "Invalid username or password"});
+        check caller->respond(unauthorizedResponse);
+        return;
+    }
+    
+    User user = userRecord.value;
+    
+    // Hash the provided password and compare with stored hash
+    string hashedInputPassword = hashPassword(loginDetails.password);
+    
+    if (hashedInputPassword != user.password) {
+        log:printError("Invalid username or password");
+        http:Response unauthorizedResponse = new;
+        unauthorizedResponse.statusCode = 401; // Unauthorized status code
+        unauthorizedResponse.setJsonPayload({"error": "Invalid username or password"});
+        check caller->respond(unauthorizedResponse);
+        return;
+    }
+    
+    // Generate a new refresh token
+    string refreshToken = uuid:createType1AsString();
+    
+    // Update the user record with the new refresh token
+    map<json> filter = {"username": user.username};
+    mongodb:Update updateOperation = {
+        "set": {"email_refresh_token": refreshToken}
+    };
+    _ = check mongodb:userCollection->updateOne(filter, updateOperation);
+    
+    // Generate JWT token 
+    string token = check generateJwtToken(user);
+    
+    // Get current time and device info
+    time:Utc utcNow = time:utcNow();
+    string currentTime = time:utcToString(utcNow);
+    string|http:HeaderNotFoundError userAgentResult = req.getHeader("User-Agent");
+    string userAgent = userAgentResult is string ? userAgentResult : "Chrome Extension";
+    
+    // Send login welcome email asynchronously (non-blocking)
+    // sendLoginWelcomeEmailAsync(user.username, user.name, currentTime, userAgent);
+    // sendLoginWelcomeEmailAsync(user.username, user.name, currentTime, userAgent);
+    
+    // Create login response - no token in the response body
+    LoginResponse loginResponse = {
+        username: user.username,
+        name: user.name,
+        isadmin: user.isadmin,
+        role: user.role,
+        success: true,
+        calendar_connected: user.calendar_connected
+    };
 
-            // Set the refresh token in a separate cookie with longer expiration
-            http:Cookie refreshCookie = new("refresh_token", refreshToken, 
-                path = "/api/auth/refresh", // Restrict to refresh endpoint only
-                httpOnly = true, 
-                secure = true,
-                maxAge = 2592000 // 30 days
-            );
+    json loginResponseJson = loginResponse.toJson();
+    
+    // Send the response with the JWT token in HttpOnly secure cookie
+    http:Response response = new;
+    response.setJsonPayload(loginResponseJson);
+    
+        // Set the JWT token as an HttpOnly secure cookie
+        http:Cookie jwtCookie = new("auth_token", token, 
+            path = "/", 
+            httpOnly = true, 
+            secure = true,
+            maxAge = 3600 // 1 hour, matching the JWT expiration
+        );
 
-            response.addCookie(jwtCookie);
-            response.addCookie(refreshCookie);
-            check caller->respond(response);
+        // Set the refresh token in a separate cookie with longer expiration
+        http:Cookie refreshCookie = new("refresh_token", refreshToken, 
+            path = "/api/auth/refresh", // Restrict to refresh endpoint only
+            httpOnly = true, 
+            secure = true,
+            maxAge = 2592000 // 30 days
+        );
+
+        response.addCookie(jwtCookie);
+        response.addCookie(refreshCookie);
+        check caller->respond(response);
     }
 
     resource function post refresh(http:Caller caller, http:Request req) returns error? {

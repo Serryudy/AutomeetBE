@@ -1091,3 +1091,659 @@ public function generateJwtToken(User user) returns string|error {
 
     return token;
 }
+
+
+
+
+// Login welcome email function - sends when user successfully logs in
+// public function sendLoginWelcomeEmail(string userEmail, string userName, string loginTime, string loginDevice = "Unknown") returns error? {
+//     // Email configuration
+//     EmailConfig emailConfig = {
+//         host: "smtp.gmail.com",
+//         username: "somapalagalagedara@gmail.com",
+//         password: "wzhd plxq isxl nddc",
+//         frontendUrl: "http://localhost:5173" // Updated for your Chrome extension
+//     };
+
+//     // Create SMTP configuration for better security
+//     email:SmtpConfiguration smtpConfig = {
+//         port: 587,
+//         security: email:START_TLS_AUTO
+//     };
+
+//     // Create SMTP client
+//     email:SmtpClient|error smtpClient = new (emailConfig.host, emailConfig.username, emailConfig.password, smtpConfig);
+
+//     if smtpClient is error {
+//         log:printError("Failed to create SMTP client for login welcome email", smtpClient);
+//         return smtpClient;
+//     }
+
+//     string htmlContent = getLoginWelcomeEmailHtml(userName, loginTime, loginDevice, emailConfig.frontendUrl);
+
+//     email:Message loginEmail = {
+//         to: userEmail,
+//         subject: "Welcome back to AUTOMEET! 👋",
+//         body: string `Dear ${userName},
+
+// Welcome back to AUTOMEET! 
+
+// You successfully logged in at ${loginTime}.
+
+// Ready to schedule your next meeting? Access your dashboard now!
+
+// Best regards,
+// The AUTOMEET Team`,
+//         htmlBody: htmlContent
+//     };
+
+//     error? sendResult = smtpClient->sendMessage(loginEmail);
+    
+//     if sendResult is error {
+//         log:printError("Failed to send login welcome email to " + userEmail, sendResult);
+//         return sendResult;
+//     }
+    
+//     log:printInfo("Login welcome email sent successfully to: " + userEmail);
+//     return;
+// }
+
+// // Send login welcome email asynchronously (non-blocking)
+// public function sendLoginWelcomeEmailAsync(string userEmail, string userName, string loginTime, string loginDevice = "Unknown") {
+//     worker loginEmailWorker {
+//         error? result = sendLoginWelcomeEmail(userEmail, userName, loginTime, loginDevice);
+//         if result is error {
+//             log:printError("Async login welcome email sending failed", result);
+//         }
+//     }
+// }
+
+// Registration welcome email function (for new users)
+public function sendWelcomeEmail(string userEmail, string userName) returns error? {
+    // Email configuration
+    EmailConfig emailConfig = {
+        host: "smtp.gmail.com",
+        username: "somapalagalagedara@gmail.com",
+        password: "wzhd plxq isxl nddc",
+        frontendUrl: "http://localhost:5173"
+    };
+
+    // Create SMTP configuration for better security
+    email:SmtpConfiguration smtpConfig = {
+        port: 587,
+        security: email:START_TLS_AUTO
+    };
+
+    email:SmtpClient|error smtpClient = new (emailConfig.host, emailConfig.username, emailConfig.password, smtpConfig);
+
+    if smtpClient is error {
+        log:printError("Failed to create SMTP client for welcome email", smtpClient);
+        return smtpClient;
+    }
+
+    string htmlContent = getWelcomeEmailHtml(userName, emailConfig.frontendUrl);
+
+    email:Message welcomeEmail = {
+        to: userEmail,
+        subject: "Welcome to AUTOMEET! 🎉",
+        body: string `Dear ${userName},
+
+Welcome to AUTOMEET! 🚀
+
+Thank you for joining our platform - THE easiest way to schedule anything collaboratively.
+
+Best regards,
+The AUTOMEET Team`,
+        htmlBody: htmlContent
+    };
+
+    error? sendResult = smtpClient->sendMessage(welcomeEmail);
+    
+    if sendResult is error {
+        log:printError("Failed to send welcome email to " + userEmail, sendResult);
+        return sendResult;
+    }
+    
+    log:printInfo("Welcome email sent successfully to: " + userEmail);
+    return;
+}
+
+// Send registration welcome email asynchronously (non-blocking)
+public function sendWelcomeEmailAsync(string userEmail, string userName) {
+    worker welcomeEmailWorker {
+        error? result = sendWelcomeEmail(userEmail, userName);
+        if result is error {
+            log:printError("Async welcome email sending failed", result);
+        }
+    }
+}
+
+// HTML template for login welcome email
+function getLoginWelcomeEmailHtml(string userName, string loginTime, string loginDevice, string frontendUrl) returns string {
+    return string `
+    <!DOCTYPE html>
+    <html>
+        <head>
+            <style>
+                body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f5f8fa; }
+                .container { max-width: 600px; margin: 20px auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
+                .header { background: linear-gradient(135deg, #28a745, #1e7e34); color: white; padding: 30px 20px; text-align: center; }
+                .header h1 { margin: 0; font-size: 28px; font-weight: 600; }
+                .welcome-icon { font-size: 48px; margin-bottom: 15px; }
+                .content { padding: 30px; }
+                .login-info { background: #e8f5e8; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #28a745; }
+                .quick-actions { display: flex; flex-direction: column; gap: 10px; margin: 25px 0; }
+                .action-button { display: inline-block; background: linear-gradient(135deg, #007bff, #0056b3); color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; text-align: center; font-weight: 500; margin: 5px 0; }
+                .dashboard-button { background: linear-gradient(135deg, #28a745, #1e7e34); }
+                .footer { text-align: center; color: #666; font-size: 12px; margin-top: 20px; padding: 20px; background: #f8f9fa; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <div class="welcome-icon">👋</div>
+                    <h1>Welcome Back!</h1>
+                </div>
+                <div class="content">
+                    <h2>Hello ${userName}!</h2>
+                    <p>Great to see you back on AUTOMEET! You're all set to manage your meetings efficiently.</p>
+                    
+                    <div class="login-info">
+                        <h4>🔐 Login Details</h4>
+                        <p><strong>Login Time:</strong> ${loginTime}<br>
+                        <strong>Device:</strong> ${loginDevice}</p>
+                    </div>
+                    
+                    <h3>Quick Actions:</h3>
+                    <div class="quick-actions">
+                        <a href="${frontendUrl}/#/" class="action-button dashboard-button">Go to Dashboard</a>
+                        <a href="${frontendUrl}/#/direct" class="action-button">Schedule Direct Meeting</a>
+                        <a href="${frontendUrl}/#/group" class="action-button">Create Group Meeting</a>
+                        <a href="${frontendUrl}/#/roundrobin" class="action-button">Setup Round Robin</a>
+                    </div>
+                    
+                    <p>💡 <strong>Tip:</strong> Use our Chrome extension for quick access to all your scheduling needs!</p>
+                    
+                    <p>Need help? Check out our quick guides or contact support.</p>
+                    
+                    <p>Happy scheduling!<br><strong>The AUTOMEET Team</strong></p>
+                </div>
+                <div class="footer">
+                    <p>This is an automated message from AUTOMEET. Please do not reply to this email.</p>
+                    <p>If you didn't log in, please contact our support team immediately.</p>
+                </div>
+            </div>
+        </body>
+    </html>
+    `;
+}
+
+// HTML template for registration welcome email
+function getWelcomeEmailHtml(string userName, string frontendUrl) returns string {
+    return string `
+    <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Welcome to AutoMeet</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f5f7fa;
+            margin: 0;
+            padding: 20px 0;
+        }
+        
+        .email-container {
+            max-width: 600px;
+            margin: 0 auto;
+            background: #ffffff;
+            border-radius: 16px;
+            overflow: hidden;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            padding: 40px 30px;
+            text-align: center;
+            color: white;
+            position: relative;
+        }
+
+        .header-image {
+            width: 100%;
+            max-width: 500px;
+            height: 200px;
+            object-fit: cover;
+            border-radius: 12px;
+            margin-bottom: 30px;
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.2);
+        }
+        
+        .logo {
+            font-size: 24px;
+            font-weight: 700;
+            color: white;
+            margin-bottom: 30px;
+            letter-spacing: -0.02em;
+        }
+        
+        .hero-title {
+            font-size: 32px;
+            font-weight: 700;
+            margin-bottom: 16px;
+            line-height: 1.2;
+            letter-spacing: -0.02em;
+        }
+        
+        .hero-subtitle {
+            font-size: 18px;
+            font-weight: 400;
+            opacity: 0.9;
+            line-height: 1.4;
+        }
+        
+        .content {
+            padding: 40px 30px;
+        }
+        
+        .greeting {
+            font-size: 24px;
+            font-weight: 600;
+            color: #1a1a1a;
+            margin-bottom: 20px;
+        }
+        
+        .intro-text {
+            font-size: 16px;
+            color: #6b7280;
+            margin-bottom: 40px;
+            line-height: 1.6;
+        }
+        
+        .section-title {
+            font-size: 28px;
+            font-weight: 700;
+            color: #1a1a1a;
+            text-align: center;
+            margin-bottom: 40px;
+            line-height: 1.3;
+        }
+        
+        .features-container {
+            margin-bottom: 40px;
+        }
+        
+        .feature-row {
+            display: flex;
+            align-items: center;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: #f8fafc;
+            border-radius: 12px;
+            border: 1px solid #e2e8f0;
+        }
+        
+        .feature-icon {
+            width: 60px;
+            height: 60px;
+            border-radius: 12px;
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 20px;
+            flex-shrink: 0;
+        }
+        
+        .feature-icon::before {
+            content: '';
+            width: 24px;
+            height: 24px;
+            background: white;
+            border-radius: 4px;
+        }
+        
+        .feature-content {
+            flex: 1;
+        }
+        
+        .feature-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #1a1a1a;
+            margin-bottom: 6px;
+        }
+        
+        .feature-desc {
+            font-size: 14px;
+            color: #6b7280;
+            line-height: 1.5;
+        }
+        
+        .highlight-section {
+            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+            padding: 30px;
+            border-radius: 12px;
+            text-align: center;
+            margin: 40px 0;
+        }
+        
+        .highlight-title {
+            font-size: 22px;
+            font-weight: 600;
+            color: #1a1a1a;
+            margin-bottom: 12px;
+        }
+        
+        .highlight-text {
+            font-size: 16px;
+            color: #6b7280;
+            margin-bottom: 25px;
+            line-height: 1.5;
+        }
+        
+        .cta-button {
+            display: inline-block;
+            background-color: #6366f1;
+            color: white;
+            padding: 16px 32px;
+            text-decoration: none;
+            border-radius: 10px;
+            font-weight: 600;
+            font-size: 16px;
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
+        }
+        
+        
+        
+        .key-features {
+            margin: 40px 0;
+        }
+        
+        .key-features-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        
+        .key-feature {
+            text-align: center;
+            padding: 20px;
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+        }
+        
+        .key-feature-icon {
+            width: 80px;
+            height: 60px;
+            border-radius: 8px;
+            margin: 0 auto 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .key-feature-icon img {
+            max-width: 100%;
+            height: auto;
+        }
+        
+        .key-feature-icon::before {
+            content: '';
+            width: 16px;
+            height: 16px;
+            border-radius: 2px;
+        }
+        
+        .key-feature-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #1a1a1a;
+            margin-bottom: 8px;
+        }
+        
+        .key-feature-desc {
+            font-size: 12px;
+            color: #6b7280;
+            line-height: 1.4;
+        }
+        
+        .footer-section {
+            background: #f8fafc;
+            padding: 30px;
+            text-align: center;
+            margin-top: 40px;
+        }
+        
+        .footer-text {
+            font-size: 16px;
+            color: #6b7280;
+            margin-bottom: 20px;
+        }
+        
+        .signature {
+            font-size: 16px;
+            color: #1a1a1a;
+            font-weight: 500;
+        }
+        
+        .footer {
+            background: #2d3748;
+            color: #a0aec0;
+            padding: 20px 30px;
+            text-align: center;
+        }
+        
+        .footer-logo {
+            font-size: 20px;
+            font-weight: 700;
+            color: white;
+            margin-bottom: 10px;
+        }
+        
+        .footer-disclaimer {
+            font-size: 12px;
+            line-height: 1.4;
+        }
+        
+        /* Mobile Responsive */
+        @media (max-width: 640px) {
+            body {
+                padding: 10px;
+            }
+            
+            .email-container {
+                margin: 0;
+                border-radius: 12px;
+            }
+            
+            .header {
+                padding: 30px 20px;
+            }
+            
+            .hero-title {
+                font-size: 24px;
+            }
+            
+            .hero-subtitle {
+                font-size: 16px;
+            }
+            
+            .content {
+                padding: 30px 20px;
+            }
+            
+            .greeting {
+                font-size: 20px;
+            }
+            
+            .section-title {
+                font-size: 22px;
+            }
+            
+            .feature-row {
+                flex-direction: column;
+                text-align: center;
+                padding: 20px 15px;
+            }
+            
+            .feature-icon {
+                margin-right: 0;
+                margin-bottom: 15px;
+            }
+            
+            .highlight-section {
+                padding: 20px;
+            }
+            
+            .highlight-title {
+                font-size: 18px;
+            }
+            
+            .key-features-grid {
+                grid-template-columns: 1fr;
+                gap: 15px;
+            }
+            
+            .footer {
+                padding: 20px;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .hero-title {
+                font-size: 20px;
+            }
+            
+            .section-title {
+                font-size: 20px;
+            }
+            
+            .cta-button {
+                padding: 14px 24px;
+                font-size: 14px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="email-container">
+        <div class="header">
+            <div class="logo">AutoMeet</div>
+             <img src="https://res.cloudinary.com/duocpqb1j/image/upload/v1752751990/xpmvw3typrkpnuybc9bl.jpg" alt="AutoMeet Team Collaboration" class="header-image">
+            <h1 class="hero-title">Meetings That Run Themselves</h1>
+            <p class="hero-subtitle">Welcome to effortless meeting management</p>
+        </div>
+        
+        <div class="content">
+            <h2 class="greeting">Hello ${userName}!</h2>
+            <p class="intro-text">
+                Tired of managing calendars, links, and notes? AutoMeet automates organizing, hosting, and 
+                summarizing your meetings effortlessly. <strong>Welcome to the future of meeting management.</strong>
+            </p>
+            
+            <h3 class="section-title">Seize the Day,<br>One Meeting at a Time!</h3>
+            
+            <div class="features-container">
+                <div class="feature-row">
+                    <div class="feature-icon"></div>
+                    <div class="feature-content">
+                        <div class="feature-title">Direct Meetings</div>
+                        <div class="feature-desc">Schedule one-on-one meetings with smart availability detection and automatic coordination</div>
+                    </div>
+                </div>
+                
+                <div class="feature-row">
+                    <div class="feature-icon"></div>
+                    <div class="feature-content">
+                        <div class="feature-title">Group Meetings</div>
+                        <div class="feature-desc">Coordinate meetings with multiple participants using AI-powered scheduling optimization</div>
+                    </div>
+                </div>
+                
+                <div class="feature-row">
+                    <div class="feature-icon"></div>
+                    <div class="feature-content">
+                        <div class="feature-title">Round Robin Meetings</div>
+                        <div class="feature-desc">Set up rotating meeting schedules with automatic participant management</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="highlight-section">
+                <h3 class="highlight-title">One Platform to Schedule, Analyze, and Run Meetings Better</h3>
+                <p class="highlight-text">
+                    AutoMeet simplifies meeting scheduling with AI, real-time availability, seamless collaboration, 
+                    smart notifications, and analysis for participants.
+                </p>
+                <a href="${frontendUrl}/#/login" class="cta-button">Get Started</a>
+            </div>
+            
+            <div class="key-features">
+                <h3 class="section-title">Features That Do the Work for You</h3>
+                <div class="key-features-grid">
+                    <div class="key-feature">
+                        <div class="key-feature-icon"><img src="https://res.cloudinary.com/duocpqb1j/image/upload/v1752746919/ebzs2ou3kojckzflq5y7.png" alt=""></div>
+                        <div class="key-feature-title">Instant Meeting Links</div>
+                        <div class="key-feature-desc">Generate and share meeting links with a single click</div>
+                    </div>
+                    
+                    <div class="key-feature">
+                        <div class="key-feature-icon"><img src="https://res.cloudinary.com/duocpqb1j/image/upload/v1752746919/vlmf3yxi95u1ym77yqf6.png" alt=""></div>
+                        <div class="key-feature-title">Smart Integrations</div>
+                        <div class="key-feature-desc">Connect email, calendars, and messaging apps effortlessly</div>
+                    </div>
+                    
+                    <div class="key-feature">
+                        <div class="key-feature-icon"><img src="https://res.cloudinary.com/duocpqb1j/image/upload/v1752746919/misp46bbiusevcnhtctl.png" alt=""></div>
+                        <div class="key-feature-title">Seamless Scheduling</div>
+                        <div class="key-feature-desc">AutoMeet syncs calendars to find the perfect time, no hassle</div>
+                    </div>
+                    
+                    <div class="key-feature">
+                        <div class="key-feature-icon"><img src="https://res.cloudinary.com/duocpqb1j/image/upload/v1752746919/bsruvztvo215e3c0fpuk.png" alt=""></div>
+                        <div class="key-feature-title">AI-Powered Summaries</div>
+                        <div class="key-feature-desc">Get AutoMeet to handle the details so you focus on conversation</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="footer-section">
+                <p class="footer-text">
+                    Ready to transform your meeting experience? Let AutoMeet handle the coordination while you focus on what matters most.
+                </p>
+                <p class="signature">
+                    Best regards,<br>
+                    <strong>The AutoMeet Team</strong>
+                </p>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <div class="footer-logo">AutoMeet</div>
+            <p class="footer-disclaimer">
+                This is an automated message from AutoMeet.
+                Please do not reply to this email.
+            </p>
+        </div>
+    </div>
+</body>
+</html>
+    `;
+}
+
+
