@@ -172,15 +172,12 @@ public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? {
 
             // Check if notification has already been sent using member access
             boolean notificationSent = true;
-            if (currentMeeting.hasKey("deadlineNotificationSent")) {
-                anydata notificationValue = currentMeeting.get("deadlineNotificationSent");
-                if (notificationValue is boolean) {
-                    notificationSent = notificationValue;
-                }
+             if (currentMeeting.deadlineNotificationSent is boolean) {
+                notificationSent = currentMeeting.deadlineNotificationSent;
             }
 
-            if (!notificationSent) {
-                // Send notification for the first time             
+            if (!notificationSent && currentMeeting.status == "pending") {
+                // Send notification for the first time  
                 _ = check notifyCreatorToReschedule(meeting, <string>earliestTime);
 
                 // Update the meeting record to mark notification as sent             
