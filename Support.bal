@@ -12,19 +12,36 @@ public function checkAndNotifyParticipantsForRoundRobin(Meeting meeting) returns
         return;
     }
 
+    // Check tracking status first
+    map<json> trackingFilter = {"meetingId": meeting.id};
+    record {}|() trackingRecord = check mongodb:roundRobinNotificationStatusCollection->findOne(trackingFilter);
+    
+    if trackingRecord is () {
+        log:printWarn("No tracking record found for round robin meeting: " + meeting.id);
+        return;
+    }
+    
+    json trackingJson = trackingRecord.toJson();
+    RoundRobinNotificationStatus status = check trackingJson.cloneWithType(RoundRobinNotificationStatus);
+    
+    // If participants already notified, don't notify again
+    if status.participantsNotified {
+        return;
+    }
+
     // Get all host usernames
     string[] hostUsernames = [];
     foreach MeetingParticipant host in meeting?.hosts ?: [] {
         hostUsernames.push(host.username);
     }
 
-    // If no hosts, return
-    if (hostUsernames.length() == 0) {
+    if hostUsernames.length() == 0 {
         return;
     }
 
     // Check if all hosts have submitted availability
     boolean allHostsSubmitted = true;
+    string[] submittedHosts = [];
 
     foreach string hostUsername in hostUsernames {
         map<json> filter = {
@@ -34,60 +51,46 @@ public function checkAndNotifyParticipantsForRoundRobin(Meeting meeting) returns
 
         record {}|() hostAvail = check mongodb:participantAvailabilityCollection->findOne(filter);
 
-        if (hostAvail is ()) {
+        if hostAvail is record {} {
+            submittedHosts.push(hostUsername);
+        } else {
             allHostsSubmitted = false;
-            break;
         }
     }
 
+    // Update tracking record with submitted hosts
+    mongodb:Update trackingUpdate = {
+        "set": {
+            "hostsSubmitted": submittedHosts,
+            "updatedAt": time:utcToString(time:utcNow())
+        }
+    };
+    _ = check mongodb:roundRobinNotificationStatusCollection->updateOne(trackingFilter, trackingUpdate);
+
     // If all hosts have submitted, notify participants
-    if (allHostsSubmitted) {
-        // Get the creator availability to find the deadline
-        map<json> creatorAvailFilter = {
-            "username": meeting.createdBy,
-            "meetingId": meeting.id
-        };
-
-        record {}|() creatorAvail = check mongodb:availabilityCollection->findOne(creatorAvailFilter);
-
-        if (creatorAvail is ()) {
-            return; // No deadline info available
-        }
-
-        json creatorAvailJson = (<record {}>creatorAvail).toJson();
-        Availability creatorAvailability = check creatorAvailJson.cloneWithType(Availability);
-
-        // Get the earliest time slot as deadline if available
-        TimeSlot[] creatorTimeSlots = creatorAvailability.timeSlots;
-        if (creatorTimeSlots.length() == 0) {
-            return; // No time slots in creator's availability
-        }
-
-        // Find the earliest time slot
-        string? earliestTime = ();
-        foreach TimeSlot slot in creatorTimeSlots {
-            if (earliestTime is () || slot.startTime < earliestTime) {
-                earliestTime = slot.startTime;
+    if allHostsSubmitted {
+        // Mark participants as notified in tracking
+        mongodb:Update participantNotifiedUpdate = {
+            "set": {
+                "participantsNotified": true,
+                "updatedAt": time:utcToString(time:utcNow())
             }
-        }
+        };
+        _ = check mongodb:roundRobinNotificationStatusCollection->updateOne(trackingFilter, participantNotifiedUpdate);
 
-        if (earliestTime is ()) {
-            return; // No valid deadline
-        }
-
-        // Create notifications for all participants, regardless of notification settings
+        // Get participant usernames
         string[] participantUsernames = [];
         foreach MeetingParticipant participant in meeting?.participants ?: [] {
             participantUsernames.push(participant.username);
         }
 
-        if (participantUsernames.length() > 0) {
-            // Create and insert the notification
+        if participantUsernames.length() > 0 {
+            // Create notification for participants
             Notification notification = {
                 id: uuid:createType1AsString(),
                 title: meeting.title + " - Please Mark Your Availability",
                 message: "All hosts have submitted their availability for the meeting \"" + meeting.title +
-                            "\". Please mark your availability before " + earliestTime + ".",
+                            "\". Please mark your availability to help find the best meeting time.",
                 notificationType: "availability_request",
                 meetingId: meeting.id,
                 toWhom: participantUsernames,
@@ -96,17 +99,11 @@ public function checkAndNotifyParticipantsForRoundRobin(Meeting meeting) returns
 
             _ = check mongodb:notificationCollection->insertOne(notification);
 
-            // Send email notifications to all participants
-            if participantUsernames.length() > 0 {
-                // Collect email addresses for all recipients - don't check notification settings
-                map<string> participantEmails = check collectParticipantEmails(participantUsernames);
-
-                // Send email notifications
-                error? emailResult = sendEmailNotifications(notification, meeting, participantEmails);
-                if emailResult is error {
-                    log:printError("Failed to send email notifications for availability request", emailResult);
-                    // Continue execution even if email sending fails
-                }
+            // Send email notifications to participants
+            map<string> participantEmails = check collectParticipantEmails(participantUsernames);
+            error? emailResult = sendEmailNotifications(notification, meeting, participantEmails);
+            if emailResult is error {
+                log:printError("Failed to send email notifications for participant availability request", emailResult);
             }
         }
     }
@@ -773,31 +770,31 @@ public function getEmailTemplate(NotificationType notificationType, string meeti
     match notificationType {
         "creation" => {
             return {
-                subject: "[AutoMeet] You've been invited to a meeting: " + meetingTitle,
+                subject: "You've been invited to a meeting: " + meetingTitle,
                 bodyTemplate: "You have been invited to a new meeting: {meeting_title}\n\nPlease click the link below to view the meeting details:\n{meeting_link}"
             };
         }
         "cancellation" => {
             return {
-                subject: "[AutoMeet] Meeting Canceled: " + meetingTitle,
+                subject: "Meeting Canceled: " + meetingTitle,
                 bodyTemplate: "The meeting \"{meeting_title}\" has been canceled.\n\nYou can view your upcoming meetings here:\n{meeting_link}"
             };
         }
         "confirmation" => {
             return {
-                subject: "[AutoMeet] Meeting Confirmed: " + meetingTitle,
+                subject: "Meeting Confirmed: " + meetingTitle,
                 bodyTemplate: "The meeting \"{meeting_title}\" has been confirmed.\n\nPlease click the link below to view the meeting details:\n{meeting_link}"
             };
         }
         "availability_request" => {
             return {
-                subject: "[AutoMeet] Please Mark Your Availability: " + meetingTitle,
+                subject: "Please Mark Your Availability: " + meetingTitle,
                 bodyTemplate: "Please mark your availability for the meeting \"{meeting_title}\".\n\nClick the link below to set your availability:\n{meeting_link}"
             };
         }
         _ => {
             return {
-                subject: "[AutoMeet] Notification: " + meetingTitle,
+                subject: "Notification: " + meetingTitle,
                 bodyTemplate: "You have a new notification related to the meeting \"{meeting_title}\".\n\nPlease click the link below to view the details:\n{meeting_link}"
             };
         }
@@ -936,6 +933,11 @@ public function createMeetingNotification(string meetingId, string meetingTitle,
         participantRecipients.push(participant.username);
     }
 
+    if meetingType == "round_robin" {
+        // For round robin meetings, only notify hosts initially
+        return createRoundRobinInitialNotification(meetingId, meetingTitle, hosts, participants);
+    }
+
     // Add hosts to creator/host list if it's a round_robin meeting
     if hosts is MeetingParticipant[] {
         foreach MeetingParticipant host in hosts {
@@ -1026,11 +1028,7 @@ public function createMeetingNotification(string meetingId, string meetingTitle,
             participantTitle = meetingTitle + " - Please Mark Your Availability";
             participantMessage = "You have been invited to a new group meeting: \"" + meetingTitle + "\". Please mark your availability.";
             participantNotifType = "availability_request";
-        } else { // round_robin
-            participantTitle = meetingTitle + " - Please Mark Your Availability";
-            participantMessage = "You have been invited to a new round-robin meeting: \"" + meetingTitle + "\". Please mark your availability.";
-            participantNotifType = "availability_request";
-        }
+        } 
 
         Notification participantNotification = {
             id: uuid:createType1AsString(),
@@ -1082,6 +1080,66 @@ public function createMeetingNotification(string meetingId, string meetingTitle,
         toWhom: [],
         createdAt: time:utcToString(time:utcNow())
     };
+}
+
+
+public function createRoundRobinInitialNotification(string meetingId, string meetingTitle, MeetingParticipant[]? hosts, MeetingParticipant[] participants) returns Notification|error {
+    
+    if hosts is () || hosts.length() == 0 {
+        return error("Round robin meetings require at least one host");
+    }
+    
+    // Create tracking record
+    RoundRobinNotificationStatus trackingRecord = {
+        id: uuid:createType1AsString(),
+        meetingId: meetingId,
+        hostsNotified: true,
+        participantsNotified: false,
+        hostsSubmitted: [],
+        createdAt: time:utcToString(time:utcNow()),
+        updatedAt: time:utcToString(time:utcNow())
+    };
+    
+    // Insert tracking record
+    _ = check mongodb:roundRobinNotificationStatusCollection->insertOne(trackingRecord);
+    
+    // Notify only hosts
+    string[] hostUsernames = [];
+    foreach MeetingParticipant host in hosts {
+        hostUsernames.push(host.username);
+    }
+    
+    Notification hostNotification = {
+        id: uuid:createType1AsString(),
+        title: meetingTitle + " - Please Mark Your Availability (Host)",
+        message: "You are hosting a new round-robin meeting: \"" + meetingTitle + "\". Please mark your availability so participants can be notified.",
+        notificationType: "availability_request",
+        meetingId: meetingId,
+        toWhom: hostUsernames,
+        createdAt: time:utcToString(time:utcNow())
+    };
+    
+    // Insert notification
+    _ = check mongodb:notificationCollection->insertOne(hostNotification);
+    
+    // Send email notifications to hosts
+    if hostUsernames.length() > 0 {
+        map<json> meetingFilter = {"id": meetingId};
+        record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
+        
+        if meetingRecord is record {} {
+            json meetingJson = meetingRecord.toJson();
+            Meeting meeting = check meetingJson.cloneWithType(Meeting);
+            map<string> hostEmails = check collectParticipantEmails(hostUsernames);
+            error? emailResult = sendEmailNotifications(hostNotification, meeting, hostEmails);
+            
+            if emailResult is error {
+                log:printError("Failed to send email notifications to hosts", emailResult);
+            }
+        }
+    }
+    
+    return hostNotification;
 }
 
 // Function to validate that all contact IDs belong to the user

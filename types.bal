@@ -364,3 +364,13 @@ public type OllamaRequest record {
     boolean Stream?;
     map<json> options?;
 };
+
+public type RoundRobinNotificationStatus record {
+    string id;
+    string meetingId;
+    boolean hostsNotified = false;
+    boolean participantsNotified = false;
+    string[] hostsSubmitted = [];
+    string createdAt;
+    string updatedAt;
+};

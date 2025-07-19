@@ -3,7 +3,6 @@ import ballerina/log;
 import ballerina/jwt;
 import ballerina/url;
 import ballerina/uuid;
-import ballerina/time;
 import mongodb_atlas_app.mongodb;
 
 @http:ServiceConfig {
@@ -223,10 +222,6 @@ resource function post login(http:Caller caller, http:Request req) returns error
     string token = check generateJwtToken(user);
     
     // Get current time and device info
-    time:Utc utcNow = time:utcNow();
-    string currentTime = time:utcToString(utcNow);
-    string|http:HeaderNotFoundError userAgentResult = req.getHeader("User-Agent");
-    string userAgent = userAgentResult is string ? userAgentResult : "Chrome Extension";
     
     // Send login welcome email asynchronously (non-blocking)
     // sendLoginWelcomeEmailAsync(user.username, user.name, currentTime, userAgent);
@@ -466,7 +461,7 @@ resource function post login(http:Caller caller, http:Request req) returns error
     resource function get google() returns http:Response|error {
         // Include calendar-related scopes in the permission request
         string encodedRedirectUri = check url:encode(googleRedirectUri, "UTF-8");
-        string authUrl = string `https://accounts.google.com/o/oauth2/v2/auth?client_id=${googleClientId}&response_type=code&scope=email%20profile%20https://www.googleapis.com/calendar&redirect_uri=${encodedRedirectUri}&access_type=offline&prompt=consent`;
+        string authUrl = string `https://accounts.google.com/o/oauth2/v2/auth?client_id=${googleClientId}&response_type=code&scope=email%20profile%20https://www.googleapis.com/auth/calendar&redirect_uri=${encodedRedirectUri}&access_type=offline&prompt=consent`;
         
         // Create a redirect response
         http:Response response = new;
@@ -661,7 +656,7 @@ resource function post login(http:Caller caller, http:Request req) returns error
                 
         // Include calendar-specific scopes and use the calendar redirect URI
         string encodedRedirectUri = check url:encode(googleCalendarRedirectUri, "UTF-8");
-        string authUrl = string `https://accounts.google.com/o/oauth2/v2/auth?client_id=${googleClientId}&response_type=code&scope=https://www.googleapis.com/calendar&redirect_uri=${encodedRedirectUri}&access_type=offline&prompt=consent&state=${username}`;
+        string authUrl = string `https://accounts.google.com/o/oauth2/v2/auth?client_id=${googleClientId}&response_type=code&scope=https://www.googleapis.com/auth/calendar&redirect_uri=${encodedRedirectUri}&access_type=offline&prompt=consent&state=${username}`;
         
         // Create a redirect response to Google's OAuth page
         http:Response response = new;
