@@ -72,7 +72,6 @@ map<string> connectionUsers = {};
 //JWT validation configurations
 configurable string jwtIssuer = "automeet";
 configurable string jwtAudience = "automeet-app";
-configurable string jwtSigningKey = "6be1b0ba9fd7c089e3f8ce1bdfcd97613bbe986cf45c1eaec198108bad119bcbfe2088b317efb7d30bae8e60f19311ff13b8990bae0c80b4cb5333c26abcd27190d82b3cd999c9937647708857996bb8b836ee4ff65a31427d1d2c5c59ec67cb7ec94ae34007affc2722e39e7aaca590219ce19cec690ffb7846ed8787296fd679a5a2eadb7d638dc656917f837083a9c0b50deda759d453b8c9a7a4bb41ae077d169de468ec225f7ba21d04219878cd79c9329ea8c29ce8531796a9cc01dd200bb683f98585b0f98cffbf67cf8bafabb8a2803d43d67537298e4bf78c1a05a76342a44b2cf7cf3ae52b78469681b47686352122f8f1af2427985ec72783c06e";
 
 // Create the WebSocket listener
 listener websocket:Listener chatListener = new(9090);
@@ -98,7 +97,7 @@ service /ws/chat on chatListener {
             return error websocket:UpgradeError("Unauthorized: Invalid authentication token");
         }
         
-        log:printInfo(string `New WebSocket connection authenticated for user: ${userId}`);
+        log:printInfo(`New WebSocket connection authenticated for user: ${userId}`);
         return new ChatSocketService(userId, mongodb:db, mongodb:chatroomCollection, mongodb:messageCollection);
     }
 }
@@ -119,7 +118,7 @@ service class ChatSocketService {
         self.db = automeetDb;
         self.chatroomCollection = chatroomCollection;
         self.messageCollection = messageCollection;
-        log:printInfo(string `Initializing chat service for user: ${userId}`);
+        log:printInfo(`Initializing chat service for user: ${userId}`);
     }
 
     remote function onOpen(websocket:Caller caller) returns error? {
@@ -128,7 +127,7 @@ service class ChatSocketService {
         userRooms[connectionId] = [];
         connectionUsers[connectionId] = self.userId;
         
-        log:printInfo(string `User ${self.userId} connected with WebSocket ID: ${connectionId}`);
+        log:printInfo(`User ${self.userId} connected with WebSocket ID: ${connectionId}`);
         
         // Send connection acknowledgment
         check caller->writeMessage({
@@ -143,7 +142,7 @@ service class ChatSocketService {
         websocket:Caller? userCaller = connections[connectionId];
         
         if userCaller is () {
-            log:printError(string `No connection found for ID: ${connectionId}`);
+            log:printError(`No connection found for ID: ${connectionId}`);
             return;
         }
         
@@ -258,7 +257,7 @@ service class ChatSocketService {
                     check self.handleTypingNotification(caller, parsedMessage);
                 }
                 _ => {
-                    log:printError(string `Unknown message type: ${parsedMessage._type}`);
+                    log:printError(`Unknown message type: ${parsedMessage._type}`);
                     check caller->writeMessage({
                         "_type": "error",
                         "content": "Unknown message type: " + parsedMessage._type
@@ -282,12 +281,12 @@ service class ChatSocketService {
         _ = userRooms.remove(connectionId);
         _ = connectionUsers.remove(connectionId);
         
-        log:printInfo(string `User ${self.userId} disconnected. Connection ID: ${connectionId}. Status code: ${statusCode}, reason: ${reason}`);
+        log:printInfo(`User ${self.userId} disconnected. Connection ID: ${connectionId}. Status code: ${statusCode}, reason: ${reason}`);
     }
 
     remote function onError(websocket:Caller caller, error err) {
         string connectionId = caller.getConnectionId();
-        log:printError(string `Error in WebSocket connection ${connectionId}`, err);
+        log:printError(`Error in WebSocket connection ${connectionId}`, err);
     }
 
     // Handle new room creation
@@ -342,7 +341,7 @@ service class ChatSocketService {
         // Save to database with error handling
         do {
             _ = check self.chatroomCollection->insertOne(newRoom);
-            log:printInfo(string `Room ${roomId} created and saved to database`);
+            log:printInfo(`Room ${roomId} created and saved to database`);
         } on fail error dbError {
             log:printError("Database error while creating room", dbError);
             check caller->writeMessage({
@@ -371,7 +370,7 @@ service class ChatSocketService {
             "timestamp": timestamp
         });
         
-        log:printInfo(string `User ${self.userId} created room ${roomId} with ${allParticipants.length()} participants`);
+        log:printInfo(`User ${self.userId} created room ${roomId} with ${allParticipants.length()} participants`);
         
         // Notify other participants that they've been added to a new room
         foreach string participantId in allParticipants {
@@ -440,7 +439,7 @@ service class ChatSocketService {
             "timestamp": time:utcToString(time:utcNow())
         });
         
-        log:printInfo(string `User ${self.userId} joined room ${roomId}`);
+        log:printInfo(`User ${self.userId} joined room ${roomId}`);
     }
 
     // Handle room leave request
@@ -465,7 +464,7 @@ service class ChatSocketService {
                 "timestamp": time:utcToString(time:utcNow())
             });
             
-            log:printInfo(string `User ${self.userId} left room ${roomId}`);
+            log:printInfo(`User ${self.userId} left room ${roomId}`);
         }
     }
 
@@ -578,7 +577,7 @@ service class ChatSocketService {
         // Insert the message into the database with error handling
         do {
             _ = check self.messageCollection->insertOne(dbMessage);
-            log:printInfo(string `Message saved to database: ${messageId}`);
+            log:printInfo(`Message saved to database: ${messageId}`);
         } on fail error dbError {
             log:printError("Database error while saving message", dbError);
             check caller->writeMessage({
@@ -601,7 +600,7 @@ service class ChatSocketService {
         
         check self.broadcastToRoom(message.roomId ?: "", broadcastMessage, connectionId);
         
-        log:printInfo(string `Message from user ${self.userId} sent to room ${message.roomId ?: ""}`);
+        log:printInfo(`Message from user ${self.userId} sent to room ${message.roomId ?: ""}`);
     }
 
     // Handle typing notification
@@ -746,7 +745,7 @@ service /api/chat on ln {
     resource function get rooms(@http:Header {name: "Cookie"} string? cookieHeader) returns ApiResponse|error {
         // Extract and validate the token
         string userId = check validateUserFromCookie(cookieHeader);
-        log:printInfo(string `Fetching chat rooms for user: ${userId}`);
+        log:printInfo(`Fetching chat rooms for user: ${userId}`);
         
         // Query the database for rooms where the user is a participant
         record{}[] rooms = [];
@@ -790,7 +789,7 @@ service /api/chat on ln {
         
         return {
             success: true,
-            message: string `Retrieved ${roomResponses.length()} chat rooms`,
+            message: "Retrieved " + roomResponses.length().toString() + " chat rooms",
             data: roomResponses
         };
     }
@@ -806,7 +805,7 @@ service /api/chat on ln {
 ) returns ApiResponse|error {
     // Extract and validate the token
     string userId = check validateUserFromCookie(cookieHeader);
-    log:printInfo(string `Fetching messages for room ${roomId} for user: ${userId}`);
+    log:printInfo(`Fetching messages for room ${roomId} for user: ${userId}`);
     
     // First, check if the user has access to this room
     boolean hasAccess = check validateRoomAccess(userId, roomId);
@@ -893,7 +892,7 @@ service /api/chat on ln {
     
     return {
         success: true,
-        message: string `Retrieved ${messageResponses.length()} messages for room ${roomId}`,
+        message: "Retrieved " + messageResponses.length().toString() + " messages for room " + roomId,
         data: messageResponses
     };
 }
@@ -905,7 +904,7 @@ service /api/chat on ln {
     ) returns ApiResponse|error {
         // Extract and validate the token
         string userId = check validateUserFromCookie(cookieHeader);
-        log:printInfo(string `Fetching room ${roomId} for user: ${userId}`);
+        log:printInfo(`Fetching room ${roomId} for user: ${userId}`);
         
         // Check if the user has access to this room
         boolean hasAccess = check validateRoomAccess(userId, roomId);
@@ -975,7 +974,7 @@ service /api/chat on ln {
     ) returns ApiResponse|error {
         // Extract and validate the token
         string userId = check validateUserFromCookie(cookieHeader);
-        log:printInfo(string `Adding members to room ${roomId} by user: ${userId}`);
+        log:printInfo(`Adding members to room ${roomId} by user: ${userId}`);
         
         // Check if the user has access to this room
         boolean hasAccess = check validateRoomAccess(userId, roomId);
@@ -1153,7 +1152,7 @@ service /api/chat on ln {
         
         return {
             success: true,
-            message: string `Successfully added ${addedMembers.length()} members to the room`,
+            message: "Successfully added " + addedMembers.length().toString() + " members to the room",
             data: {
                 "addedMembers": addedMembers
             }
@@ -1167,7 +1166,7 @@ service /api/chat on ln {
     ) returns ApiResponse|error {
         // Extract and validate the token
         string userId = check validateUserFromCookie(cookieHeader);
-        log:printInfo(string `Removing members from room ${roomId} by user: ${userId}`);
+        log:printInfo(`Removing members from room ${roomId} by user: ${userId}`);
         
         // Check if the user has access to this room
         boolean hasAccess = check validateRoomAccess(userId, roomId);
@@ -1367,7 +1366,7 @@ service /api/chat on ln {
         
         return {
             success: true,
-            message: string `Successfully removed ${removedMembers.length()} members from the room`,
+            message: "Successfully removed " + removedMembers.length().toString() + " members from the room",
             data: {
                 "removedMembers": removedMembers
             }
@@ -1422,7 +1421,7 @@ function validateAndGetUsernameFromToken(string token) returns string|error {
         issuer: jwtIssuer,
         audience: jwtAudience,
         signatureConfig: {
-            secret: jwtSigningKey
+            secret: JWT_SECRET
         }
     };
     

@@ -6,6 +6,15 @@ import ballerina/uuid;
 import ballerina/time;
 import mongodb_atlas_app.mongodb;
 
+// Configuration variables
+configurable string JWT_SECRET = ?;
+configurable string googleClientId = ?;
+configurable string googleClientSecret = ?;
+configurable string googleRedirectUri = ?;
+configurable string googleCalendarRedirectUri = ?;
+configurable string frontendBaseUrl = ?;
+configurable string googleCalendarScopes = ?;
+
 @http:ServiceConfig {
     cors: {
         allowOrigins: ["http://localhost:3000", "http://localhost:5173"],
@@ -466,7 +475,8 @@ resource function post login(http:Caller caller, http:Request req) returns error
     resource function get google() returns http:Response|error {
         // Include calendar-related scopes in the permission request
         string encodedRedirectUri = check url:encode(googleRedirectUri, "UTF-8");
-        string authUrl = string `https://accounts.google.com/o/oauth2/v2/auth?client_id=${googleClientId}&response_type=code&scope=email%20profile%20https://www.googleapis.com/calendar&redirect_uri=${encodedRedirectUri}&access_type=offline&prompt=consent`;
+        string encodedScopes = check url:encode("email profile " + googleCalendarScopes, "UTF-8");
+        string authUrl = "https://accounts.google.com/o/oauth2/v2/auth?client_id=" + googleClientId + "&response_type=code&scope=" + encodedScopes + "&redirect_uri=" + encodedRedirectUri + "&access_type=offline&prompt=consent";
         
         // Create a redirect response
         http:Response response = new;
@@ -493,7 +503,7 @@ resource function post login(http:Caller caller, http:Request req) returns error
         http:Client googleTokenClient = check new ("https://oauth2.googleapis.com");
         http:Request tokenRequest = new;
         string encodedRedirectUri = check url:encode(googleRedirectUri, "UTF-8");
-        tokenRequest.setTextPayload(string `code=${code}&client_id=${googleClientId}&client_secret=${googleClientSecret}&redirect_uri=${encodedRedirectUri}&grant_type=authorization_code`, "application/x-www-form-urlencoded");
+        tokenRequest.setTextPayload("code=" + code + "&client_id=" + googleClientId + "&client_secret=" + googleClientSecret + "&redirect_uri=" + encodedRedirectUri + "&grant_type=authorization_code", "application/x-www-form-urlencoded");
         
         http:Response tokenResponse = check googleTokenClient->post("/token", tokenRequest);
         json tokenJson = check tokenResponse.getJsonPayload();
@@ -657,7 +667,8 @@ resource function post login(http:Caller caller, http:Request req) returns error
                 
         // Include calendar-specific scopes and use the calendar redirect URI
         string encodedRedirectUri = check url:encode(googleCalendarRedirectUri, "UTF-8");
-        string authUrl = string `https://accounts.google.com/o/oauth2/v2/auth?client_id=${googleClientId}&response_type=code&scope=https://www.googleapis.com/calendar&redirect_uri=${encodedRedirectUri}&access_type=offline&prompt=consent&state=${username}`;
+        string encodedScopes = check url:encode(googleCalendarScopes, "UTF-8");
+        string authUrl = "https://accounts.google.com/o/oauth2/v2/auth?client_id=" + googleClientId + "&response_type=code&scope=" + encodedScopes + "&redirect_uri=" + encodedRedirectUri + "&access_type=offline&prompt=consent&state=" + username;
         
         // Create a redirect response to Google's OAuth page
         http:Response response = new;
@@ -685,7 +696,7 @@ resource function post login(http:Caller caller, http:Request req) returns error
         http:Client googleTokenClient = check new ("https://oauth2.googleapis.com");
         http:Request tokenRequest = new;
         string encodedRedirectUri = check url:encode(googleCalendarRedirectUri, "UTF-8");
-        tokenRequest.setTextPayload(string `code=${code}&client_id=${googleClientId}&client_secret=${googleClientSecret}&redirect_uri=${encodedRedirectUri}&grant_type=authorization_code`, "application/x-www-form-urlencoded");
+        tokenRequest.setTextPayload("code=" + code + "&client_id=" + googleClientId + "&client_secret=" + googleClientSecret + "&redirect_uri=" + encodedRedirectUri + "&grant_type=authorization_code", "application/x-www-form-urlencoded");
         
         http:Response tokenResponse = check googleTokenClient->post("/token", tokenRequest);
         json tokenJson = check tokenResponse.getJsonPayload();

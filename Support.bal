@@ -1,11 +1,62 @@
 import mongodb_atlas_app.mongodb;
+
 import ballerina/email;
 import ballerina/http;
 import ballerina/jwt;
 import ballerina/log;
 import ballerina/regex;
-import ballerina/uuid;
 import ballerina/time;
+import ballerina/uuid;
+
+// Helper function to convert time to Sri Lankan time format
+public function convertToSriLankanTime(string utcTimeString) returns string {
+    // Parse the UTC time string (expected format: "2024-07-20T14:30:00Z" or "2024-07-20T14:30:00")
+    time:Utc|error utcTime = time:utcFromString(utcTimeString.endsWith("Z") ? utcTimeString : utcTimeString + "Z");
+
+    if utcTime is error {
+        log:printError("Failed to parse time: " + utcTimeString, utcTime);
+        return utcTimeString; // Return original if parsing fails
+    }
+
+    // Add 5 hours 30 minutes for Sri Lankan time (UTC+5:30)
+    time:Utc sriLankanUtc = time:utcAddSeconds(utcTime, 5 * 3600 + 30 * 60);
+    time:Civil sriLankanTime = time:utcToCivil(sriLankanUtc);
+
+    // Format as "Date: July 20, 2024, Time: 8:00 PM"
+    string[] months = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December"
+    ];
+
+    string monthName = months[sriLankanTime.month - 1];
+
+    // Convert to 12-hour format
+    int displayHour = sriLankanTime.hour;
+    string amPm = "AM";
+
+    if displayHour == 0 {
+        displayHour = 12;
+    } else if displayHour > 12 {
+        displayHour = displayHour - 12;
+        amPm = "PM";
+    } else if displayHour == 12 {
+        amPm = "PM";
+    }
+
+    string formattedTime = string `${monthName} ${sriLankanTime.day}, ${sriLankanTime.year} at ${displayHour}:${sriLankanTime.minute < 10 ? "0" : ""}${sriLankanTime.minute} ${amPm}`;
+
+    return formattedTime;
+}
 
 public function checkAndNotifyParticipantsForRoundRobin(Meeting meeting) returns error? {
     if (meeting.meetingType != "round_robin" || meeting?.hosts is () || meeting?.participants is ()) {
@@ -148,18 +199,18 @@ public function sendAvailabilityRequestNotification(Meeting meeting) returns err
         map<json> settingsFilter = {
             "username": recipient
         };
-        
+
         record {}|() settingsRecord = check mongodb:notificationSettingsCollection->findOne(settingsFilter);
-        
+
         // Fix the email notification check
         if (settingsRecord is record {}) {
             json settingsJson = settingsRecord.toJson();
             NotificationSettings settings = check settingsJson.cloneWithType(NotificationSettings);
-            
+
             if settings.email_notifications {
                 map<string> recipientEmail = check collectParticipantEmails([recipient]);
                 error? emailResult = sendEmailNotifications(notification, meeting, recipientEmail);
-                
+
                 if (emailResult is error) {
                     log:printError("Failed to send availability request email", emailResult);
                 }
@@ -168,44 +219,292 @@ public function sendAvailabilityRequestNotification(Meeting meeting) returns err
     }
 }
 
+// Function to check if 80% participants have submitted and find best time slot
+public function checkParticipantAvailabilityAndFindBestSlot(Meeting meeting) returns error? {
+    if (meeting.meetingType != "group" && meeting.meetingType != "round_robin") {
+        return;
+    }
+
+    log:printInfo(string `Checking participant availability threshold for meeting ${meeting.id}`);
+
+    // Count total participants
+    int totalParticipants = 0;
+    if (meeting?.participants is MeetingParticipant[]) {
+        totalParticipants = (<MeetingParticipant[]>meeting?.participants).length();
+    }
+
+    if (totalParticipants == 0) {
+        log:printInfo(string `No participants found for meeting ${meeting.id}`);
+        return;
+    }
+
+    // Count participants who have submitted availability
+    map<json> participantAvailFilter = {
+        "meetingId": meeting.id
+    };
+
+    stream<record {}, error?> participantAvailCursor = check mongodb:participantAvailabilityCollection->find(participantAvailFilter);
+    string[] participantsWithAvailability = [];
+
+    check from record {} availData in participantAvailCursor
+        do {
+            json availJson = availData.toJson();
+            ParticipantAvailability avail = check availJson.cloneWithType(ParticipantAvailability);
+            participantsWithAvailability.push(avail.username);
+        };
+
+    int participantsSubmitted = participantsWithAvailability.length();
+    float participationPercentage = <float>participantsSubmitted / <float>totalParticipants * 100.0;
+
+    log:printInfo(string `Meeting ${meeting.id}: ${participantsSubmitted}/${totalParticipants} participants submitted (${participationPercentage}%)`);
+
+    // Check if we've reached 80% threshold
+    if (participationPercentage >= 80.0) {
+        log:printInfo(string `80% threshold reached for meeting ${meeting.id}, finding best time slot`);
+
+        // Find the best time slot
+        TimeSlot? bestSlot = check findBestTimeSlotForParticipants(meeting);
+        
+        if (bestSlot is TimeSlot) {
+            // Determine recipients (creator and hosts for round robin)
+            string[] recipients = [meeting.createdBy];
+
+            if (meeting.meetingType == "round_robin" && meeting?.hosts is MeetingParticipant[]) {
+                foreach MeetingParticipant host in meeting?.hosts ?: [] {
+                    if (host.username != meeting.createdBy) {
+                        recipients.push(host.username);
+                    }
+                }
+            }
+
+            // Check if we already have a best time slot record for this meeting
+            map<json> bestSlotFilter = {
+                "meetingId": meeting.id
+            };
+
+            record {}|() existingBestSlot = check mongodb:bestTimeSlotCollection->findOne(bestSlotFilter);
+            
+            // Create or update best time slot record
+            string existingId = "";
+            
+            if (existingBestSlot is record {}) {
+                json existingJson = existingBestSlot.toJson();
+                json|error idResult = existingJson.id;
+                
+                if (idResult is json) {
+                    existingId = idResult.toString();
+                }
+            }
+            
+            BestTimeSlot bestTimeSlotRecord = {
+                id: existingBestSlot is () ? uuid:createType1AsString() : existingId,
+                meetingId: meeting.id,
+                timeSlot: {
+                    startTime: bestSlot.startTime,
+                    endTime: bestSlot.endTime,
+                    isBestTimeSlot: true
+                },
+                participantCount: participantsSubmitted,
+                participationPercentage: participationPercentage,
+                totalParticipants: totalParticipants,
+                foundAt: time:utcToString(time:utcNow()),
+                notifiedUsers: recipients
+            };
+
+            if (existingBestSlot is ()) {
+                // Insert new best time slot record
+                _ = check mongodb:bestTimeSlotCollection->insertOne(bestTimeSlotRecord);
+                log:printInfo(string `Created new best time slot record for meeting ${meeting.id}`);
+            } else {
+                // Update existing best time slot record
+                mongodb:Update updateOperation = {
+                    "set": {
+                        "timeSlot": check bestTimeSlotRecord.timeSlot.cloneWithType(json),
+                        "participantCount": bestTimeSlotRecord.participantCount,
+                        "participationPercentage": bestTimeSlotRecord.participationPercentage,
+                        "totalParticipants": bestTimeSlotRecord.totalParticipants,
+                        "foundAt": bestTimeSlotRecord.foundAt,
+                        "notifiedUsers": bestTimeSlotRecord.notifiedUsers
+                    }
+                };
+                
+                _ = check mongodb:bestTimeSlotCollection->updateOne(bestSlotFilter, updateOperation);
+                log:printInfo(string `Updated best time slot record for meeting ${meeting.id}`);
+            }
+
+            // Send notification to creator (and hosts for round robin)
+            check sendBestTimeSlotNotification(meeting, bestSlot, participationPercentage);
+        } else {
+            log:printInfo(string `No suitable best time slot found for meeting ${meeting.id}`);
+        }
+    } else {
+        log:printInfo(string `80% threshold not yet reached for meeting ${meeting.id} (current: ${participationPercentage}%)`);
+    }
+
+    return;
+}
+
+// Function to find best time slot specifically for participant availability
+public function findBestTimeSlotForParticipants(Meeting meeting) returns TimeSlot?|error {
+    log:printInfo(string `Finding best time slot for participants in meeting ${meeting.id}`);
+
+    // Get participant availabilities
+    map<json> participantAvailFilter = {
+        "meetingId": meeting.id
+    };
+
+    stream<record {}, error?> participantAvailCursor = check mongodb:participantAvailabilityCollection->find(participantAvailFilter);
+    TimeSlot[] participantTimeSlots = [];
+
+    check from record {} availData in participantAvailCursor
+        do {
+            json availJson = availData.toJson();
+            ParticipantAvailability avail = check availJson.cloneWithType(ParticipantAvailability);
+            foreach TimeSlot slot in avail.timeSlots {
+                participantTimeSlots.push(slot);
+            }
+        };
+
+    if (participantTimeSlots.length() == 0) {
+        log:printInfo(string `No participant time slots found for meeting ${meeting.id}`);
+        return ();
+    }
+
+    // For group meetings, find the time slot with maximum participant overlaps
+    map<int> timeSlotScores = {};
+    TimeSlot? bestTimeSlot = ();
+    int highestScore = 0;
+
+    // Score each participant time slot based on overlaps with other participants
+    foreach TimeSlot candidateSlot in participantTimeSlots {
+        string slotKey = candidateSlot.startTime + "-" + candidateSlot.endTime;
+        int score = 0;
+
+        // Count overlapping participant slots (including the candidate itself)
+        foreach TimeSlot participantSlot in participantTimeSlots {
+            if (candidateSlot.startTime <= participantSlot.endTime && 
+                candidateSlot.endTime >= participantSlot.startTime) {
+                score = score + 1;
+            }
+        }
+
+        timeSlotScores[slotKey] = score;
+
+        if (score > highestScore) {
+            highestScore = score;
+            bestTimeSlot = candidateSlot;
+        }
+    }
+
+    if (bestTimeSlot is TimeSlot) {
+        log:printInfo(string `Best time slot found for meeting ${meeting.id}: ${bestTimeSlot.startTime} - ${bestTimeSlot.endTime} with ${highestScore} participants`);
+    }
+
+    return bestTimeSlot;
+}
+
+// Function to send notification about best time slot found
+public function sendBestTimeSlotNotification(Meeting meeting, TimeSlot bestSlot, float participationPercentage) returns error? {
+    log:printInfo(string `Sending best time slot notification for meeting ${meeting.id}`);
+
+    // Determine recipients (creator and hosts for round robin)
+    string[] recipients = [meeting.createdBy];
+
+    if (meeting.meetingType == "round_robin" && meeting?.hosts is MeetingParticipant[]) {
+        foreach MeetingParticipant host in meeting?.hosts ?: [] {
+            if (host.username != meeting.createdBy) {
+                recipients.push(host.username);
+            }
+        }
+    }
+
+    // Create notification
+    Notification notification = {
+        id: uuid:createType1AsString(),
+        title: meeting.title + " - Best Time Slot Found",
+        message: string `Great news! With ${participationPercentage}% of participants having submitted their availability, we've identified the optimal time slot for "${meeting.title}": ${convertToSriLankanTime(bestSlot.startTime)} to ${convertToSriLankanTime(bestSlot.endTime)}. Please review and confirm this time slot.`,
+        notificationType: "best_timeslot_found",
+        meetingId: meeting.id,
+        toWhom: recipients,
+        createdAt: time:utcToString(time:utcNow())
+    };
+
+    // Insert notification
+    _ = check mongodb:notificationCollection->insertOne(notification);
+
+    // Send email notifications to recipients with email notifications enabled
+    foreach string recipient in recipients {
+        map<json> settingsFilter = {
+            "username": recipient
+        };
+
+        record {}|() settingsRecord = check mongodb:notificationSettingsCollection->findOne(settingsFilter);
+
+        if (settingsRecord is record {}) {
+            json settingsJson = settingsRecord.toJson();
+            NotificationSettings settings = check settingsJson.cloneWithType(NotificationSettings);
+
+            if (settings.email_notifications) {
+                map<string> recipientEmail = check collectParticipantEmails([recipient]);
+                
+                // Temporarily set the best time slot in meeting for email template
+                TimeSlot? originalTimeSlot = meeting?.directTimeSlot;
+                meeting.directTimeSlot = bestSlot;
+                
+                error? emailResult = sendEmailNotifications(notification, meeting, recipientEmail);
+                
+                // Restore original time slot
+                meeting.directTimeSlot = originalTimeSlot;
+
+                if (emailResult is error) {
+                    log:printError(string `Failed to send best time slot email to ${recipient}`, emailResult);
+                }
+            }
+        }
+    }
+
+    log:printInfo(string `Best time slot notification sent for meeting ${meeting.id} to ${recipients.length()} recipients`);
+    return;
+}
+
 // Add to MeetingService.bal or Support.bal
 public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? {
     if (meeting.meetingType != "group" && meeting.meetingType != "round_robin") {
         return;
     }
-    
+
     // Get all availability entries for this meeting
     map<json> availFilter = {
         "meetingId": meeting.id
     };
-    
+
     stream<record {}, error?> availCursor = check mongodb:availabilityCollection->find(availFilter);
     TimeSlot? latestTimeSlot = ();
-    
+
     // Process availabilities to find the latest time slot
     check from record {} availData in availCursor
         do {
             json availJson = availData.toJson();
             Availability availability = check availJson.cloneWithType(Availability);
-            
+
             foreach TimeSlot slot in availability.timeSlots {
                 if (latestTimeSlot is () || slot.endTime > latestTimeSlot.endTime) {
                     latestTimeSlot = slot;
                 }
             }
         };
-    
+
     if (latestTimeSlot is ()) {
         return;
     }
 
     // Get notification recipients (creator and hosts only)
     string[] recipients = [meeting.createdBy];
-    
+
     // Add hosts for round robin meetings
     if (meeting.meetingType == "round_robin" && meeting?.hosts is MeetingParticipant[]) {
         foreach MeetingParticipant host in meeting?.hosts ?: [] {
-            if (host.username != meeting.createdBy) {  // Avoid duplicates
+            if (host.username != meeting.createdBy) { // Avoid duplicates
                 recipients.push(host.username);
             }
         }
@@ -215,8 +514,8 @@ public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? {
     Notification notification = {
         id: uuid:createType1AsString(),
         title: meeting.title + " - Availability Update",
-        message: string `New participant availability submission received for "${meeting.title}". ` + 
-                string `Latest submission deadline is ${latestTimeSlot.endTime}.`,
+        message: string `New participant availability submission received for "${meeting.title}". ` +
+                string `Latest submission deadline is ${convertToSriLankanTime(latestTimeSlot.endTime)}.`,
         notificationType: "availability_update",
         meetingId: meeting.id,
         toWhom: recipients,
@@ -227,14 +526,14 @@ public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? {
     map<json> notificationFilter = {
         "meetingId": meeting.id
     };
-    
+
     record {}|() notificationStatus = check mongodb:availabilityNotificationStatusCollection->findOne(notificationFilter);
     string currentDate = time:utcToString(time:utcNow()).substring(0, 10);
-    
+
     if (notificationStatus is record {}) {
         json statusJson = notificationStatus.toJson();
         AvailabilityNotificationStatus status = check statusJson.cloneWithType(AvailabilityNotificationStatus);
-        
+
         if (status.lastNotificationDate == currentDate) {
             mongodb:Update updateOperation = {
                 "set": {
@@ -254,9 +553,9 @@ public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? {
     };
 
     mongodb:Update statusUpdate = {
-        "set": <map<json>> newStatus.toJson()
+        "set": <map<json>>newStatus.toJson()
     };
-    
+
     _ = check mongodb:availabilityNotificationStatusCollection->updateOne(
         notificationFilter,
         statusUpdate,
@@ -266,31 +565,30 @@ public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? {
     // Insert notification if first submission of the day
     if (notificationStatus is () || (<record {}>notificationStatus).toJson().lastNotificationDate != currentDate) {
         _ = check mongodb:notificationCollection->insertOne(notification);
-        
+
         // Handle email notifications for recipients
         foreach string recipient in recipients {
             map<json> settingsFilter = {
                 "username": recipient
             };
-            
+
             record {}|() settingsRecord = check mongodb:notificationSettingsCollection->findOne(settingsFilter);
-            
+
             if (settingsRecord is record {}) {
                 NotificationSettings|error settings = settingsRecord.toJson().cloneWithType(NotificationSettings);
                 if settings is NotificationSettings && settings.email_notifications {
-                map<string> recipientEmail = check collectParticipantEmails([recipient]);
-                error? emailResult = sendEmailNotifications(notification, meeting, recipientEmail);
-                
-                if (emailResult is error) {
-                    log:printError("Failed to send availability update email", emailResult);
+                    map<string> recipientEmail = check collectParticipantEmails([recipient]);
+                    error? emailResult = sendEmailNotifications(notification, meeting, recipientEmail);
+
+                    if (emailResult is error) {
+                        log:printError("Failed to send availability update email", emailResult);
+                    }
                 }
             }
         }
+
+        return;
     }
-
-
-    return;
-}
 }
 
 public function findBestTimeSlot(Meeting meeting) returns TimeSlot?|error {
@@ -403,7 +701,7 @@ public function findBestTimeSlot(Meeting meeting) returns TimeSlot?|error {
             id: uuid:createType1AsString(),
             title: meeting.title + " - Suggested Time",
             message: "Based on everyone's availability, the suggested time for \"" + meeting.title +
-                    "\" is " + bestTimeSlot.startTime + " to " + bestTimeSlot.endTime +
+                    "\" is " + convertToSriLankanTime(bestTimeSlot.startTime) + " to " + convertToSriLankanTime(bestTimeSlot.endTime) +
                     ". Please confirm this time slot via the meeting details page.",
             notificationType: "availability_request",
             meetingId: meeting.id,
@@ -675,38 +973,49 @@ public function sendEmailNotifications(Notification notification, Meeting meetin
         password: "psec mnvm mevn rfuj",
         frontendUrl: "http://localhost:3000"
     };
-    
-    email:SmtpClient|error smtpClient = new (emailConfig.host, emailConfig.username, emailConfig.password);
+
+    // Create SMTP configuration for Gmail
+    email:SmtpConfiguration smtpConfig = {
+        port: 587,
+        security: email:START_TLS_AUTO
+    };
+
+    email:SmtpClient|error smtpClient = new (emailConfig.host, emailConfig.username, emailConfig.password, smtpConfig);
 
     if smtpClient is error {
         log:printError("Failed to create SMTP client", smtpClient);
         return smtpClient;
     }
-    
+
+    log:printInfo("SMTP client created successfully. Starting to send emails to " + notification.toWhom.length().toString() + " recipients");
+
     foreach string username in notification.toWhom {
+        log:printInfo("Processing email for user: " + username);
+
         if !participantEmails.hasKey(username) {
             log:printWarn("No email address found for user: " + username);
             continue;
         }
 
         string recipientEmail = participantEmails[username] ?: "";
-        
+        log:printInfo("Found email for " + username + ": " + recipientEmail);
+
         // Check if user exists in user collection
         map<json> userFilter = {
             "username": username
         };
-        
+
         record {}|() userRecord = check mongodb:userCollection->findOne(userFilter);
         string meetingLink;
-        
+
         if userRecord is () {
             // User not in system - generate external links based on notification type
             if notification.notificationType == "availability_request" {
                 // Generate a UUID for external user
                 string externalUserId = uuid:createType1AsString();
                 meetingLink = string `${emailConfig.frontendUrl}/exavailability/${externalUserId}/${meeting.id}`;
-            } else if notification.notificationType == "confirmation" || 
-                      notification.notificationType == "cancellation" {
+            } else if notification.notificationType == "confirmation" ||
+                    notification.notificationType == "cancellation" {
                 meetingLink = string `${emailConfig.frontendUrl}/exmeetingdetails/${meeting.id}`;
             } else {
                 meetingLink = string `${emailConfig.frontendUrl}/exmeetingdetails/${meeting.id}`;
@@ -715,10 +1024,10 @@ public function sendEmailNotifications(Notification notification, Meeting meetin
             // Regular user - use normal meeting link
             meetingLink = string `${emailConfig.frontendUrl}/meetingdetails/${meeting.id}`;
         }
-        
+
         // Get email template and customize it
         EmailTemplate template = getEmailTemplate(notification.notificationType, meeting.title);
-        
+
         // Replace placeholders in template
         string personalizedBody = regex:replace(
                 regex:replace(
@@ -729,52 +1038,54 @@ public function sendEmailNotifications(Notification notification, Meeting meetin
                 "\\{meeting_link\\}",
                 meetingLink
         );
-        
-        // Add meeting details
+
+        // Add meeting details line by line
+        personalizedBody = personalizedBody + "\n\n</br>Meeting Details</br>\n" +
+            "Location: " + meeting.location + "\n" +
+            "Description: " + meeting.description;
+
+        // Add time information based on meeting type and notification type
         if notification.notificationType == "cancellation" {
-            personalizedBody = personalizedBody + "\n\nCanceled Meeting Details:\n" +
-                "Location: " + meeting.location + "\n" +
-                "Description: " + meeting.description;
-            
-            // Add time information for canceled meetings
+            // For cancellation emails, just add basic meeting info
             if meeting.meetingType == "direct" && meeting?.directTimeSlot is TimeSlot {
                 TimeSlot timeSlot = <TimeSlot>meeting?.directTimeSlot;
-                personalizedBody = personalizedBody + "\nScheduled Time: " + timeSlot.startTime + " to " + timeSlot.endTime;
+                string sriLankanStartTime = convertToSriLankanTime(timeSlot.startTime);
+                string sriLankanEndTime = convertToSriLankanTime(timeSlot.endTime);
+                personalizedBody = personalizedBody + "\nScheduled Start: " + sriLankanStartTime + "\nScheduled End: " + sriLankanEndTime;
             }
-            
-            // Add cancellation timestamp and canceled by info if available
-            if meeting?.canceledAt is string {
-                personalizedBody = personalizedBody + "\nCanceled on: " + (<string>meeting?.canceledAt);
-            }
-            if meeting?.canceledBy is string {
-                personalizedBody = personalizedBody + "\nCanceled by: " + (<string>meeting?.canceledBy);
-            }
-        } else {
-            personalizedBody = personalizedBody + "\n\nMeeting Details:\n" +
-                "Location: " + meeting.location + "\n" +
-                "Description: " + meeting.description;
-            
-            // Add time information based on meeting type
-            if meeting.meetingType == "direct" && meeting?.directTimeSlot is TimeSlot {
-                TimeSlot timeSlot = <TimeSlot>meeting?.directTimeSlot;
-                personalizedBody = personalizedBody + "\nTime: " + timeSlot.startTime + " to " + timeSlot.endTime;
-            } else if meeting.meetingType == "group" || meeting.meetingType == "round_robin" {
-                if userRecord is () {
-                    personalizedBody = personalizedBody + "\nPlease use the link above to submit your availability. " +
-                                     "No registration required.";
-                } else {
-                    personalizedBody = personalizedBody + "\nPlease mark your availability using the link above.";
-                }
+            personalizedBody = personalizedBody + "\n\nThis meeting has been canceled and removed from your schedule.";
+        } else if meeting.meetingType == "direct" && meeting?.directTimeSlot is TimeSlot {
+            TimeSlot timeSlot = <TimeSlot>meeting?.directTimeSlot;
+            string sriLankanStartTime = convertToSriLankanTime(timeSlot.startTime);
+            string sriLankanEndTime = convertToSriLankanTime(timeSlot.endTime);
+            personalizedBody = personalizedBody + "\nStart: " + sriLankanStartTime + "\nEnd: " + sriLankanEndTime;
+        } else if meeting.meetingType == "group" || meeting.meetingType == "round_robin" {
+            if userRecord is () {
+                personalizedBody = personalizedBody + "\nPlease use the link above to submit your availability. " +
+                                "No registration required.";
+            } else {
+                personalizedBody = personalizedBody + "\nPlease mark your availability using the link above.";
             }
         }
 
-        // Create email message
+        // Create email message with improved headers for better deliverability
         email:Message emailMsg = {
             to: recipientEmail,
             subject: template.subject,
             body: personalizedBody,
-            htmlBody: getHtmlEmailForNotification(meeting.title, personalizedBody, meetingLink, notification.notificationType)
+            htmlBody: getHtmlEmail(meeting.title, personalizedBody, meetingLink),
+            headers: {
+                "X-Priority": "3",
+                "X-Mailer": "AutoMeet System",
+                "Reply-To": "noreply@automeet.com"
+            }
         };
+
+        // Log email details for debugging
+        log:printInfo("Sending email to: " + recipientEmail);
+        log:printInfo("Email subject: " + template.subject);
+        log:printInfo("Notification type: " + notification.notificationType);
+        log:printInfo("Meeting type: " + meeting.meetingType);
 
         // Send email
         error? sendResult = smtpClient->sendMessage(emailMsg);
@@ -783,6 +1094,10 @@ public function sendEmailNotifications(Notification notification, Meeting meetin
             log:printError("Failed to send email to " + recipientEmail, sendResult);
         } else {
             log:printInfo("Email sent successfully to " + recipientEmail);
+            if notification.notificationType == "cancellation" {
+                log:printInfo("CANCELLATION email sent to " + recipientEmail + " with subject: " + template.subject);
+                log:printInfo("Note: If email not received, please check spam/junk folder");
+            }
         }
     }
 
@@ -793,33 +1108,37 @@ public function getEmailTemplate(NotificationType notificationType, string meeti
     match notificationType {
         "creation" => {
             return {
-                subject: "[AutoMeet] You've been invited to a meeting: " + meetingTitle,
-                bodyTemplate: "You have been invited to a new meeting: {meeting_title}\n\nPlease click the link below to view the meeting details:\n{meeting_link}"
+                subject: "You've been invited to a meeting: " + meetingTitle,
+                bodyTemplate: "You have been invited to a new meeting: {meeting_title}\n\nPlease click the link below to view the meeting details :\n{meeting_link}"
             };
         }
         "cancellation" => {
             return {
-                subject: "[AutoMeet] Meeting Canceled: " + meetingTitle,
-                bodyTemplate: "We're writing to inform you that the meeting \"{meeting_title}\" has been canceled.\n\n" +
-                             "If you have any questions about this cancellation, please contact the meeting organizer.\n\n" +
-                             "You can view your other upcoming meetings here:\n{meeting_link}"
+                subject: "Meeting Cancellation: " + meetingTitle,
+                bodyTemplate: "\"{meeting_title}\" has been canceled and removed from your schedule."
             };
         }
         "confirmation" => {
             return {
-                subject: "[AutoMeet] Meeting Confirmed: " + meetingTitle,
-                bodyTemplate: "The meeting \"{meeting_title}\" has been confirmed.\n\nPlease click the link below to view the meeting details:\n{meeting_link}"
+                subject: "Meeting Confirmed: " + meetingTitle,
+                bodyTemplate: "The meeting \"{meeting_title}\" has been confirmed.\n\nPlease click the link below to view the meeting details :\n{meeting_link}"
             };
         }
         "availability_request" => {
             return {
-                subject: "[AutoMeet] Please Mark Your Availability: " + meetingTitle,
+                subject: "Please Mark Your Availability: " + meetingTitle,
                 bodyTemplate: "Please mark your availability for the meeting \"{meeting_title}\".\n\nClick the link below to set your availability:\n{meeting_link}"
+            };
+        }
+        "best_timeslot_found" => {
+            return {
+                subject: "Best Time Slot Found: " + meetingTitle,
+                bodyTemplate: "Great news! We've found the optimal time slot for your meeting \"{meeting_title}\" based on participant availability.\n\nPlease click the link below to review and confirm the suggested time:\n{meeting_link}"
             };
         }
         _ => {
             return {
-                subject: "[AutoMeet] Notification: " + meetingTitle,
+                subject: "Notification: " + meetingTitle,
                 bodyTemplate: "You have a new notification related to the meeting \"{meeting_title}\".\n\nPlease click the link below to view the details:\n{meeting_link}"
             };
         }
@@ -827,68 +1146,180 @@ public function getEmailTemplate(NotificationType notificationType, string meeti
 }
 
 public function getHtmlEmail(string meetingTitle, string textContent, string meetingLink) returns string {
-    return getHtmlEmailForNotification(meetingTitle, textContent, meetingLink, "creation");
-}
+    // Convert newlines to HTML line breaks for better formatting
+    string htmlContent = regex:replaceAll(textContent, "\n", "<br>");
 
-public function getHtmlEmailForNotification(string meetingTitle, string textContent, string meetingLink, NotificationType notificationType) returns string {
-    string headerColor = "#4a86e8";
-    string buttonText = "View Meeting";
-    string buttonColor = "#4a86e8";
-    
-    // Customize colors and text based on notification type
-    if notificationType == "cancellation" {
-        headerColor = "#e74c3c";
-        buttonColor = "#e74c3c";
-        buttonText = "View Your Meetings";
-    } else if notificationType == "confirmation" {
-        headerColor = "#27ae60";
-        buttonColor = "#27ae60";
-        buttonText = "View Meeting Details";
-    } else if notificationType == "availability_request" {
-        headerColor = "#f39c12";
-        buttonColor = "#f39c12";
-        buttonText = "Mark Availability";
-    }
-    
-    string cancellationNotice = "";
-    if notificationType == "cancellation" {
-        cancellationNotice = "<div class=\"cancellation-notice\"><strong>⚠️ Meeting Canceled</strong></div>";
-    }
-    
-    return "<html>" +
-        "<head>" +
-        "<style>" +
-        "body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }" +
-        ".container { max-width: 600px; margin: 0 auto; padding: 20px; }" +
-        ".header { background-color: " + headerColor + "; color: white; padding: 15px 20px; border-radius: 5px 5px 0 0; }" +
-        ".content { padding: 20px; border: 1px solid #ddd; border-top: none; border-radius: 0 0 5px 5px; }" +
-        ".button { display: inline-block; background-color: " + buttonColor + "; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin-top: 15px; font-weight: bold; }" +
-        ".button:hover { opacity: 0.9; }" +
-        ".footer { margin-top: 20px; font-size: 12px; color: #777; text-align: center; }" +
-        ".meeting-details { background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 15px 0; }" +
-        ".cancellation-notice { background-color: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px; margin: 10px 0; }" +
-        "</style>" +
-        "</head>" +
-        "<body>" +
-        "<div class=\"container\">" +
-        "<div class=\"header\">" +
-        "<h2>AutoMeet</h2>" +
-        "</div>" +
-        "<div class=\"content\">" +
-        cancellationNotice +
-        "<h3>" + meetingTitle + "</h3>" +
-        "<div class=\"meeting-details\">" +
-        "<pre style=\"font-family: Arial, sans-serif; white-space: pre-wrap; margin: 0;\">" + textContent + "</pre>" +
-        "</div>" +
-        "<a href=\"" + meetingLink + "\" class=\"button\">" + buttonText + "</a>" +
-        "</div>" +
-        "<div class=\"footer\">" +
-        "<p>This is an automated message from AutoMeet. Please do not reply to this email.</p>" +
-        "<p>If you have any questions, please contact the meeting organizer directly.</p>" +
-        "</div>" +
-        "</div>" +
-        "</body>" +
-        "</html>";
+    return string `
+    <!DOCTYPE html>
+    <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>AutoMeet - Meeting Notification</title>
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                body { 
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+                    line-height: 1.6; 
+                    color: #333; 
+                    background-color: #f8f9fa;
+                }
+                .email-wrapper { 
+                    max-width: 650px; 
+                    margin: 20px auto; 
+                    background: #ffffff;
+                    border-radius: 12px;
+                    box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+                    overflow: hidden;
+                }
+                .header { 
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                    color: white; 
+                    padding: 30px 25px; 
+                    text-align: center;
+                }
+                .header h1 { 
+                    font-size: 28px; 
+                    font-weight: 300; 
+                    margin-bottom: 8px;
+                    letter-spacing: 1px;
+                }
+                .header .tagline { 
+                    font-size: 14px; 
+                    opacity: 0.9;
+                    font-weight: 300;
+                }
+                .content { 
+                    padding: 40px 30px; 
+                    background: #ffffff;
+                }
+                .meeting-title { 
+                    font-size: 24px; 
+                    font-weight: 600; 
+                    color: #2c3e50;
+                    margin-bottom: 20px;
+                    text-align: center;
+                    padding-bottom: 15px;
+                    border-bottom: 2px solid #e9ecef;
+                }
+                .meeting-details { 
+                    background: #f8f9fa;
+                    border-left: 4px solid #667eea;
+                    padding: 20px;
+                    margin: 25px 0;
+                    border-radius: 0 8px 8px 0;
+                    font-size: 14px;
+                    line-height: 1.8;
+                }
+                .meeting-details strong {
+                    color: #495057;
+                    font-weight: 600;
+                }
+                .action-button { 
+                    display: inline-block; 
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    color: white !important; 
+                    padding: 15px 35px; 
+                    text-decoration: none; 
+                    border-radius: 50px; 
+                    margin: 25px 0;
+                    font-weight: 600;
+                    font-size: 16px;
+                    text-align: center;
+                    display: block;
+                    max-width: 280px;
+                    margin-left: auto;
+                    margin-right: auto;
+                    transition: all 0.3s ease;
+                    box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+                }
+                .action-button:hover {
+                    transform: translateY(-2px);
+                    box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+                }
+                .divider {
+                    height: 1px;
+                    background: linear-gradient(to right, transparent, #e9ecef, transparent);
+                    margin: 30px 0;
+                }
+                .footer { 
+                    background: #f8f9fa;
+                    padding: 25px; 
+                    text-align: center;
+                    border-top: 1px solid #e9ecef;
+                }
+                .footer p { 
+                    font-size: 12px; 
+                    color: #6c757d;
+                    margin-bottom: 10px;
+                }
+                .footer .brand {
+                    color: #667eea;
+                    font-weight: 600;
+                    text-decoration: none;
+                }
+                .social-links {
+                    margin-top: 15px;
+                }
+                .social-links a {
+                    display: inline-block;
+                    margin: 0 8px;
+                    padding: 8px;
+                    background: #e9ecef;
+                    border-radius: 50%;
+                    text-decoration: none;
+                    color: #495057;
+                    font-size: 14px;
+                }
+                .highlight {
+                    background: #fff3cd;
+                    color: #856404;
+                    padding: 15px;
+                    border-radius: 8px;
+                    border-left: 4px solid #ffc107;
+                    margin: 20px 0;
+                    font-size: 14px;
+                }
+                @media only screen and (max-width: 600px) {
+                    .email-wrapper { margin: 10px; border-radius: 8px; }
+                    .header { padding: 25px 20px; }
+                    .content { padding: 30px 20px; }
+                    .meeting-title { font-size: 20px; }
+                    .action-button { padding: 12px 25px; font-size: 14px; }
+                }
+            </style>
+        </head>
+        <body>
+            <div class="email-wrapper">
+                <div class="header">
+                    <h1>AutoMeet</h1>
+                    <div class="tagline">Effortless Meeting Coordination</div>
+                </div>
+                <div class="content">
+                    <h2 class="meeting-title">Meeting Title: ${meetingTitle}</h2>
+                    
+                    <div class="meeting-details">
+                        ${htmlContent}
+                    </div>
+                    
+                    <div class="divider"></div>
+                    
+                    <div style="text-align: center;">
+                        <a href="${meetingLink}" class="action-button">View Meeting Details</a>
+                    </div>
+                    
+                    <div class="highlight">
+                        <strong>Quick Tip:</strong> Click the button above to access all meeting information, update your availability, or manage your participation.
+                    </div>
+                </div>
+                <div class="footer">
+                    <p>This is an automated message from <a href="#" class="brand">AutoMeet</a></p>
+                    <p>Making meeting coordination simple and efficient</p>
+                </div>
+            </div>
+        </body>
+    </html>
+    `;
 }
 
 public function collectParticipantEmails(string[] usernames) returns map<string>|error {
@@ -1241,17 +1672,16 @@ public function hasAuthorizationHeader(http:Request req) returns boolean {
     return req.hasHeader("Authorization");
 }
 
-
 // Enhanced participant processing function that handles both registered and unregistered users
 public function processParticipantsWithEmails(string creatorUsername, string[] participantIds, string meetingId, MeetingType meetingType) returns MeetingParticipant[]|error {
     if participantIds.length() == 0 {
         return [];
     }
-    
+
     MeetingParticipant[] processedParticipants = [];
     string[] unregisteredParticipants = [];
     map<string> participantEmails = {};
-    
+
     // Process each participant
     foreach string participantId in participantIds {
         // Create a filter to find the contact
@@ -1259,34 +1689,34 @@ public function processParticipantsWithEmails(string creatorUsername, string[] p
             "id": participantId,
             "createdBy": creatorUsername
         };
-        
+
         // Query the contacts collection
         record {}|() contact = check mongodb:contactCollection->findOne(contactFilter);
-        
+
         if contact is () {
             return error("Invalid participant ID: Participant must be in the user's contacts");
         }
-        
+
         // Extract contact details
         json contactJson = contact.toJson();
         string contactUsername = check contactJson.username.ensureType();
         string contactEmail = check contactJson.email.ensureType();
-        
+
         // Store email for later use
         participantEmails[contactUsername] = contactEmail;
-        
+
         // Check if this contact is a registered user
         map<json> userFilter = {
             "username": contactUsername
         };
-        
+
         record {}|() userRecord = check mongodb:userCollection->findOne(userFilter);
-        
+
         if userRecord is () {
             // Unregistered user - add to unregistered list
             unregisteredParticipants.push(contactUsername);
         }
-        
+
         // Add to processed participants regardless of registration status
         processedParticipants.push({
             username: contactUsername,
@@ -1294,66 +1724,72 @@ public function processParticipantsWithEmails(string creatorUsername, string[] p
             email: contactEmail
         });
     }
-    
+
     // Send appropriate emails to unregistered participants
     if unregisteredParticipants.length() > 0 {
         error? emailResult = sendUnregisteredParticipantEmails(
-            unregisteredParticipants, 
-            participantEmails, 
-            meetingId, 
-            meetingType
+                unregisteredParticipants,
+                participantEmails,
+                meetingId,
+                meetingType
         );
-        
+
         if emailResult is error {
             log:printError("Failed to send emails to unregistered participants", emailResult);
             // Continue execution even if email sending fails
         }
     }
-    
+
     return processedParticipants;
 }
 
 // Function to send emails to unregistered participants with appropriate links
 public function sendUnregisteredParticipantEmails(string[] unregisteredUsernames, map<string> participantEmails, string meetingId, MeetingType meetingType) returns error? {
-    
+
     EmailConfig emailConfig = {
         host: "smtp.gmail.com",
         username: "automeetitfac@gmail.com",
         password: "psec mnvm mevn rfuj",
         frontendUrl: "http://localhost:3000"
     };
-    
-    email:SmtpClient|error smtpClient = new (emailConfig.host, emailConfig.username, emailConfig.password);
-    
+
+    // Create SMTP configuration for Gmail
+    email:SmtpConfiguration smtpConfig = {
+        port: 587,
+        security: email:START_TLS_AUTO
+    };
+
+    email:SmtpClient|error smtpClient = new (emailConfig.host, emailConfig.username, emailConfig.password, smtpConfig);
+
     if smtpClient is error {
         log:printError("Failed to create SMTP client", smtpClient);
         return smtpClient;
     }
-    
+
     // Get meeting details for email content
     map<json> meetingFilter = {
         "id": meetingId
     };
-    
+
     record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
     if meetingRecord is () {
         return error("Meeting not found");
     }
-    
+
     json meetingJson = meetingRecord.toJson();
     Meeting meeting = check meetingJson.cloneWithType(Meeting);
-    
+
     foreach string username in unregisteredUsernames {
         if !participantEmails.hasKey(username) {
             log:printWarn("No email address found for unregistered user: " + username);
             continue;
         }
-        
+
         string recipientEmail = participantEmails[username] ?: "";
-        
+
         // Generate UUID for external user
         string externalUserId = uuid:createType1AsString();
-        
+
         // Store the external user mapping for future reference
         ExternalUserMapping userMapping = {
             id: uuid:createType1AsString(),
@@ -1362,48 +1798,51 @@ public function sendUnregisteredParticipantEmails(string[] unregisteredUsernames
             meetingId: meetingId,
             createdAt: time:utcToString(time:utcNow())
         };
-        
+
         _ = check mongodb:externalUserMappingCollection->insertOne(userMapping);
-        
+
         // Generate appropriate link based on meeting type
         string meetingLink;
         string emailSubject;
         string emailBody;
-        
+
         if meetingType == "direct" {
             meetingLink = string `${emailConfig.frontendUrl}/exmeetingdetails/${meetingId}`;
             emailSubject = "[AutoMeet] You've been invited to a meeting: " + meeting.title;
             emailBody = string `You have been invited to a meeting: "${meeting.title}"
             
-Meeting Details:
+</br>Meeting Details</br>
 - Location: ${meeting.location}
 - Description: ${meeting.description}
 - Type: Direct Meeting`;
-            
+
             // Add time information if available
             if meeting?.directTimeSlot is TimeSlot {
                 TimeSlot timeSlot = <TimeSlot>meeting?.directTimeSlot;
+                string sriLankanStartTime = convertToSriLankanTime(timeSlot.startTime);
+                string sriLankanEndTime = convertToSriLankanTime(timeSlot.endTime);
                 emailBody = emailBody + string `
-- Time: ${timeSlot.startTime} to ${timeSlot.endTime}`;
+- Start: ${sriLankanStartTime}
+- End: ${sriLankanEndTime}`;
             }
-            
+
             emailBody = emailBody + string `
 
-Click the link below to view the meeting details:
+Click the link below to view the meeting details :
 ${meetingLink}
 
 No registration required. You can view the meeting information directly.`;
-            
+
         } else { // group or round_robin
             meetingLink = string `${emailConfig.frontendUrl}/exavailability/${externalUserId}/${meetingId}`;
             emailSubject = "[AutoMeet] Please mark your availability: " + meeting.title;
             emailBody = string `You have been invited to a meeting: "${meeting.title}"
             
-Meeting Details:
+</br>Meeting Details</br>
 - Location: ${meeting.location}
 - Description: ${meeting.description}
 - Type: ${meetingType == "group" ? "Group Meeting" : "Round Robin Meeting"}`;
-            
+
             // Add duration information if available
             if meetingType == "group" && meeting?.groupDuration is string {
                 emailBody = emailBody + string `
@@ -1412,7 +1851,7 @@ Meeting Details:
                 emailBody = emailBody + string `
 - Duration: ${meeting?.roundRobinDuration ?: ""}`;
             }
-            
+
             emailBody = emailBody + string `
 
 Please click the link below to mark your availability:
@@ -1420,7 +1859,7 @@ ${meetingLink}
 
 No registration required. Simply select your available time slots to help us find the best meeting time for everyone.`;
         }
-        
+
         // Create and send email
         email:Message emailMsg = {
             to: recipientEmail,
@@ -1428,115 +1867,245 @@ No registration required. Simply select your available time slots to help us fin
             body: emailBody,
             htmlBody: getUnregisteredUserHtmlEmail(meeting.title, emailBody, meetingLink, meetingType)
         };
-        
+
         error? sendResult = smtpClient->sendMessage(emailMsg);
-        
+
         if sendResult is error {
             log:printError("Failed to send email to unregistered user " + recipientEmail, sendResult);
         } else {
             log:printInfo("Email sent successfully to unregistered user " + recipientEmail);
         }
     }
-    
+
     return;
 }
 
 // HTML email template for unregistered users
 public function getUnregisteredUserHtmlEmail(string meetingTitle, string textContent, string meetingLink, MeetingType meetingType) returns string {
-    string actionText = meetingType == "direct" ? "View Meeting Details" : "Mark Your Availability";
-    string instructionText = meetingType == "direct" ? 
-        "Click below to view the meeting details" : 
+    string actionText = meetingType == "direct" ? "📅 View Meeting Details" : "📝 Mark Your Availability";
+    string instructionText = meetingType == "direct" ?
+        "Click below to view the meeting details" :
         "Click below to select your available time slots";
-    
-    return "<html>" +
-        "<head>" +
-        "<style>" +
-        "body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; }" +
-        ".container { max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f9f9f9; }" +
-        ".header { background-color: #4a86e8; color: white; padding: 20px; border-radius: 8px 8px 0 0; text-align: center; }" +
-        ".content { padding: 30px; border: 1px solid #ddd; border-top: none; border-radius: 0 0 8px 8px; background-color: white; }" +
-        ".button { display: inline-block; background-color: #4a86e8; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; margin-top: 20px; font-weight: bold; }" +
-        ".button:hover { background-color: #3a76d8; }" +
-        ".meeting-info { background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 15px 0; }" +
-        ".footer { margin-top: 20px; font-size: 12px; color: #777; text-align: center; border-top: 1px solid #eee; padding-top: 15px; }" +
-        ".highlight { color: #4a86e8; font-weight: bold; }" +
-        "</style>" +
-        "</head>" +
-        "<body>" +
-        "<div class=\"container\">" +
-        "<div class=\"header\">" +
-        "<h2>🤝 AutoMeet Invitation</h2>" +
-        "</div>" +
-        "<div class=\"content\">" +
-        "<h3>You're invited to: <span class=\"highlight\">" + meetingTitle + "</span></h3>" +
-        "<div class=\"meeting-info\">" +
-        regex:replaceAll(textContent, "\n", "<br/>") +
-        "</div>" +
-        "<p><strong>" + instructionText + ":</strong></p>" +
-        "<div style=\"text-align: center;\">" +
-        "<a href=\"" + meetingLink + "\" class=\"button\">" + actionText + "</a>" +
-        "</div>" +
-        "<p style=\"margin-top: 20px; font-size: 14px; color: #666;\">" +
-        "<strong>Note:</strong> No account registration is required. This link is specifically created for you to participate in this meeting." +
-        "</p>" +
-        "</div>" +
-        "<div class=\"footer\">" +
-        "<p>This is an automated invitation from AutoMeet. Please do not reply to this email.</p>" +
-        "<p>If you have any questions about this meeting, please contact the meeting organizer directly.</p>" +
-        "</div>" +
-        "</div>" +
-        "</body>" +
-        "</html>";
+
+    // Convert newlines to HTML line breaks
+    string htmlContent = regex:replaceAll(textContent, "\n", "<br>");
+
+    return string `
+    <!DOCTYPE html>
+    <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>AutoMeet - Meeting Invitation</title>
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                body { 
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+                    line-height: 1.6; 
+                    color: #333; 
+                    background-color: #f8f9fa;
+                }
+                .email-wrapper { 
+                    max-width: 650px; 
+                    margin: 20px auto; 
+                    background: #ffffff;
+                    border-radius: 12px;
+                    box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+                    overflow: hidden;
+                }
+                .header { 
+                    background: linear-gradient(135deg, #28a745 0%, #20c997 100%); 
+                    color: white; 
+                    padding: 30px 25px; 
+                    text-align: center;
+                }
+                .header h1 { 
+                    font-size: 28px; 
+                    font-weight: 300; 
+                    margin-bottom: 8px;
+                    letter-spacing: 1px;
+                }
+                .header .tagline { 
+                    font-size: 14px; 
+                    opacity: 0.9;
+                    font-weight: 300;
+                }
+                .content { 
+                    padding: 40px 30px; 
+                    background: #ffffff;
+                }
+                .meeting-title { 
+                    font-size: 24px; 
+                    font-weight: 600; 
+                    color: #2c3e50;
+                    margin-bottom: 20px;
+                    text-align: center;
+                    padding-bottom: 15px;
+                    border-bottom: 2px solid #e9ecef;
+                }
+                .invitation-notice {
+                    background: #e8f5e8;
+                    border-left: 4px solid #28a745;
+                    padding: 20px;
+                    margin: 25px 0;
+                    border-radius: 0 8px 8px 0;
+                    font-size: 14px;
+                }
+                .meeting-details { 
+                    background: #f8f9fa;
+                    border-left: 4px solid #20c997;
+                    padding: 20px;
+                    margin: 25px 0;
+                    border-radius: 0 8px 8px 0;
+                    font-size: 14px;
+                    line-height: 1.8;
+                }
+                .action-button { 
+                    display: inline-block; 
+                    background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+                    color: white !important; 
+                    padding: 15px 35px; 
+                    text-decoration: none; 
+                    border-radius: 50px; 
+                    margin: 25px 0;
+                    font-weight: 600;
+                    font-size: 16px;
+                    text-align: center;
+                    display: block;
+                    max-width: 300px;
+                    margin-left: auto;
+                    margin-right: auto;
+                    transition: all 0.3s ease;
+                    box-shadow: 0 4px 15px rgba(40, 167, 69, 0.3);
+                }
+                .no-registration {
+                    background: #fff3cd;
+                    color: #856404;
+                    padding: 15px;
+                    border-radius: 8px;
+                    border-left: 4px solid #ffc107;
+                    margin: 20px 0;
+                    font-size: 14px;
+                    text-align: center;
+                }
+                .divider {
+                    height: 1px;
+                    background: linear-gradient(to right, transparent, #e9ecef, transparent);
+                    margin: 30px 0;
+                }
+                .footer { 
+                    background: #f8f9fa;
+                    padding: 25px; 
+                    text-align: center;
+                    border-top: 1px solid #e9ecef;
+                }
+                .footer p { 
+                    font-size: 12px; 
+                    color: #6c757d;
+                    margin-bottom: 10px;
+                }
+                .footer .brand {
+                    color: #28a745;
+                    font-weight: 600;
+                    text-decoration: none;
+                }
+                @media only screen and (max-width: 600px) {
+                    .email-wrapper { margin: 10px; border-radius: 8px; }
+                    .header { padding: 25px 20px; }
+                    .content { padding: 30px 20px; }
+                    .meeting-title { font-size: 20px; }
+                    .action-button { padding: 12px 25px; font-size: 14px; }
+                }
+            </style>
+        </head>
+        <body>
+            <div class="email-wrapper">
+                <div class="header">
+                    <h1>AutoMeet</h1>
+                    <div class="tagline">You're Invited!</div>
+                </div>
+                <div class="content">
+                    <h2 class="meeting-title">${meetingTitle}</h2>
+                    
+                    <div class="invitation-notice">
+                        <strong>🎉 Meeting Invitation</strong><br>
+                        ${instructionText} - no account registration required!
+                    </div>
+                    
+                    <div class="meeting-details">
+                        ${htmlContent}
+                    </div>
+                    
+                    <div class="divider"></div>
+                    
+                    <div style="text-align: center;">
+                        <a href="${meetingLink}" class="action-button">${actionText}</a>
+                    </div>
+                    
+                    <div class="no-registration">
+                        <strong>✨ No Registration Required</strong><br>
+                        Simply click the button above to participate. It's that easy!
+                    </div>
+                </div>
+                <div class="footer">
+                    <p>This invitation was sent via <a href="#" class="brand">AutoMeet</a></p>
+                    <p>Making meeting coordination simple and efficient</p>
+                    <p style="margin-top: 15px; font-size: 11px; color: #adb5bd;">
+                        Please do not reply directly to this email. Contact the meeting organizer for questions.
+                    </p>
+                </div>
+            </div>
+        </body>
+    </html>
+    `;
 }
-
-
 
 // Updated createMeetingNotification function to handle mixed participant types
 public function createMeetingNotificationWithMixedParticipants(
-    string meetingId, 
-    string meetingTitle, 
-    MeetingType meetingType, 
-    MeetingParticipant[] participants, 
-    MeetingParticipant[]? hosts = ()
+        string meetingId,
+        string meetingTitle,
+        MeetingType meetingType,
+        MeetingParticipant[] participants,
+        MeetingParticipant[]? hosts = ()
 ) returns Notification|error {
-    
+
     // Separate registered and unregistered participants
     string[] registeredParticipants = [];
     string[] unregisteredParticipants = [];
-    
+
     foreach MeetingParticipant participant in participants {
         // Check if participant is registered
         map<json> userFilter = {
             "username": participant.username
         };
-        
+
         record {}|() userRecord = check mongodb:userCollection->findOne(userFilter);
-        
+
         if userRecord is record {} {
             registeredParticipants.push(participant.username);
         } else {
             unregisteredParticipants.push(participant.username);
         }
     }
-    
+
     // Create notifications only for registered participants
     if registeredParticipants.length() > 0 {
         string participantTitle;
         string participantMessage;
         NotificationType participantNotifType;
-        
+
         if meetingType == "direct" {
             participantTitle = meetingTitle + " - Meeting Invitation";
             participantMessage = "You have been invited to a new meeting: " + meetingTitle;
             participantNotifType = "creation";
         } else {
             participantTitle = meetingTitle + " - Please Mark Your Availability";
-            participantMessage = "You have been invited to a new " + 
-                (meetingType == "group" ? "group" : "round-robin") + 
+            participantMessage = "You have been invited to a new " +
+                (meetingType == "group" ? "group" : "round-robin") +
                 " meeting: \"" + meetingTitle + "\". Please mark your availability.";
             participantNotifType = "availability_request";
         }
-        
+
         Notification participantNotification = {
             id: uuid:createType1AsString(),
             title: participantTitle,
@@ -1546,40 +2115,40 @@ public function createMeetingNotificationWithMixedParticipants(
             toWhom: registeredParticipants,
             createdAt: time:utcToString(time:utcNow())
         };
-        
+
         // Insert the notification
         _ = check mongodb:notificationCollection->insertOne(participantNotification);
-        
+
         // Send email notifications to registered participants
         if registeredParticipants.length() > 0 {
             map<json> meetingFilter = {
                 "id": meetingId
             };
-            
+
             record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
-            
+
             if meetingRecord is record {} {
                 json meetingJson = meetingRecord.toJson();
                 Meeting meeting = check meetingJson.cloneWithType(Meeting);
-                
+
                 // Collect email addresses for registered participants
                 map<string> participantEmails = check collectParticipantEmails(registeredParticipants);
-                
+
                 // Send email notifications
                 error? emailResult = sendEmailNotifications(participantNotification, meeting, participantEmails);
-                
+
                 if emailResult is error {
                     log:printError("Failed to send email notifications to registered participants", emailResult);
                 }
             }
         }
     }
-    
+
     // Log information about unregistered participants (emails already sent in processParticipantsWithEmails)
     if unregisteredParticipants.length() > 0 {
         log:printInfo(string `Sent external invitation emails to ${unregisteredParticipants.length()} unregistered participants for meeting: ${meetingTitle}`);
     }
-    
+
     // Return a notification representing the overall process
     return {
         id: uuid:createType1AsString(),
@@ -1596,9 +2165,9 @@ public function sendWelcomeEmail(string userEmail, string userName) returns erro
     // Email configuration
     EmailConfig emailConfig = {
         host: "smtp.gmail.com",
-        username: "somapalagalagedara@gmail.com",
-        password: "wzhd plxq isxl nddc",
-        frontendUrl: "http://localhost:5173"
+        username: "automeetitfac@gmail.com",
+        password: "psec mnvm mevn rfuj",
+        frontendUrl: "http://localhost:3000"
     };
 
     // Create SMTP configuration for better security
@@ -1631,12 +2200,12 @@ The AUTOMEET Team`,
     };
 
     error? sendResult = smtpClient->sendMessage(welcomeEmail);
-    
+
     if sendResult is error {
         log:printError("Failed to send welcome email to " + userEmail, sendResult);
         return sendResult;
     }
-    
+
     log:printInfo("Welcome email sent successfully to: " + userEmail);
     return;
 }

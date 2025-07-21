@@ -1,7 +1,7 @@
 // Meeting related types
 public type MeetingType "direct" | "group" | "round_robin";
 public type MeetingStatus "pending" | "confirmed" | "canceled";
-public type NotificationType "creation" | "cancellation" | "confirmation" | "availability_request" | "availability_update";
+public type NotificationType "creation" | "cancellation" | "confirmation" | "availability_request" | "availability_update" | "best_timeslot_found";
 
 // User and auth types
 public type User record {
@@ -365,4 +365,15 @@ public type OllamaRequest record {
     string prompt;
     boolean Stream?;
     map<json> options?;
+};
+
+public type BestTimeSlot record {
+    string id;
+    string meetingId;
+    TimeSlot timeSlot;
+    float participationPercentage;
+    int participantCount;
+    int totalParticipants;
+    string foundAt;
+    string[] notifiedUsers;
 };

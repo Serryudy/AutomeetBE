@@ -6,17 +6,6 @@ import ballerina/log;
 import ballerina/time;
 import ballerina/uuid;
 
-// Google OAuth config - add your client values in production
-configurable string googleClientId = ?;
-configurable string googleClientSecret = ?;
-configurable string googleRedirectUri = ?;
-configurable string googleCalendarRedirectUri = ?;
-configurable string frontendBaseUrl = ?;
-configurable string googleCalendarScopes = ?;
-
-// JWT signing key - in production, this should be in a secure configuration
-configurable string JWT_SECRET = ?;
-
 // Function to hash passwords using SHA-256
 function hashPassword(string password) returns string {
     byte[] hashedBytes = crypto:hashSha256(password.toBytes());
@@ -61,10 +50,12 @@ service /api on ln {
         // Generate a unique meeting ID
         string meetingId = uuid:createType1AsString();
 
-        // Process participants
-        MeetingParticipant[] participants = check processParticipants(
-                username,
-                payload.participantIds
+        // Process participants with email handling
+        MeetingParticipant[] participants = check processParticipantsWithEmails(
+            username,
+            payload.participantIds,
+            meetingId,
+            "direct"
         );
 
         // Create the meeting record
@@ -87,7 +78,6 @@ service /api on ln {
             meetingId: meetingId,
             isAdmin: true
         };
-        
 
         //Insert the meeting into MongoDB
         _ = check mongodb:meetingCollection->insertOne(meeting);
@@ -96,12 +86,12 @@ service /api on ln {
         //Check if the meeting time is in the future
         TimeSlot _ = payload.directTimeSlot;
 
-        // Create and insert notification
-        Notification notification = check createMeetingNotification(
-                meetingId,
-                meeting.title,
-                "direct",
-                participants
+        // Create and insert notification for registered participants only
+        Notification notification = check createMeetingNotificationWithMixedParticipants(
+            meetingId,
+            meeting.title,
+            "direct",
+            participants
         );
 
         // Add the creator to the notification recipients
@@ -138,10 +128,12 @@ service /api on ln {
         // Generate a unique meeting ID
         string meetingId = uuid:createType1AsString();
 
-        // Process participants
-        MeetingParticipant[] participants = check processParticipants(
-                username,
-                payload.participantIds
+        // Process participants with email handling
+        MeetingParticipant[] participants = check processParticipantsWithEmails(
+            username,
+            payload.participantIds,
+            meetingId,
+            "group"
         );
 
         // Create the meeting record - without time slots
@@ -179,12 +171,12 @@ service /api on ln {
 
         _ = check mongodb:availabilityCollection->insertOne(creatorAvailability);
 
-        // Create and insert notification
-        Notification notification = check createMeetingNotification(
-                meetingId,
-                meeting.title,
-                "group",
-                participants
+        // Create and insert notification for registered participants only
+        Notification notification = check createMeetingNotificationWithMixedParticipants(
+            meetingId,
+            meeting.title,
+            "group",
+            participants
         );
 
         // Add the creator to the notification recipients
@@ -227,10 +219,12 @@ service /api on ln {
                 payload.hostIds
         );
 
-        // Process participants
-        MeetingParticipant[] participants = check processParticipants(
-                username,
-                payload.participantIds
+        // Process participants with email handling
+        MeetingParticipant[] participants = check processParticipantsWithEmails(
+            username,
+            payload.participantIds,
+            meetingId,
+            "round_robin"
         );
 
         // Create the meeting record - without time slots
@@ -281,13 +275,13 @@ service /api on ln {
         // Insert the meeting into MongoDB
         _ = check mongodb:meetingCollection->insertOne(meeting);
 
-        // Create and insert notification
-        Notification notification = check createMeetingNotification(
-                meetingId,
-                meeting.title,
-                "round_robin",
-                participants,
-                hosts
+        // Create and insert notification for registered participants only
+        Notification notification = check createMeetingNotificationWithMixedParticipants(
+            meetingId,
+            meeting.title,
+            "round_robin",
+            participants,
+            hosts
         );
 
         // Add the creator to the notification recipients
@@ -370,10 +364,12 @@ service /api on ln {
         
         // Add creator to users
         allUsers.push(meeting.createdBy);
+        log:printInfo("Meeting creator added to notification list: " + meeting.createdBy);
 
         // Add participants to users
         foreach MeetingParticipant participant in meeting?.participants ?: [] {
             allUsers.push(participant.username);
+            log:printInfo("Participant added to notification list: " + participant.username);
         }
 
         // Add hosts to users if it's a round robin meeting
@@ -390,11 +386,16 @@ service /api on ln {
 
                 if !alreadyExists {
                     allUsers.push(host.username);
+                    log:printInfo("Host added to notification list: " + host.username);
                 }
             }
         }
+        
+        log:printInfo("Total users to be notified: " + allUsers.length().toString());
 
         // Check notification settings for all users
+        // For CANCELLATION notifications, we want to send emails to ALL users regardless of their settings
+        // because cancellations are critical information that should always reach participants
         foreach string userUsername in allUsers {
             // Get user's notification settings
             map<json> settingsFilter = {
@@ -407,11 +408,19 @@ service /api on ln {
                 json settingsJson = settingsRecord.toJson();
                 NotificationSettings settings = check settingsJson.cloneWithType(NotificationSettings);
 
-                if settings.email_notifications {
-                    emailRecipients.push(userUsername);
-                }
+                log:printInfo("User " + userUsername + " has notification settings - email_notifications: " + settings.email_notifications.toString());
+
+                // For cancellation, send email regardless of user preference (critical notification)
+                emailRecipients.push(userUsername);
+                log:printInfo("Added " + userUsername + " to email recipients (cancellation - always send)");
+            } else {
+                // If no notification settings found, default to sending email notifications
+                emailRecipients.push(userUsername);
+                log:printInfo("Added " + userUsername + " to email recipients (no settings found, using default)");
             }
         }
+        
+        log:printInfo("Final email recipients count: " + emailRecipients.length().toString());
 
         // Update meeting status to "canceled"
         map<json> updateFilter = {
@@ -428,7 +437,7 @@ service /api on ln {
 
         _ = check mongodb:meetingCollection->updateOne(updateFilter, updateDoc);
 
-        // Create cancellation notification
+        // Create cancellation notification for ALL participants
         Notification notification = {
             id: uuid:createType1AsString(),
             title: meeting.title + " Canceled",
@@ -439,13 +448,19 @@ service /api on ln {
             createdAt: time:utcToString(time:utcNow()) // Add the current time as ISO string
         };
 
-        // Insert notification
+        // Insert notification for all users
         _ = check mongodb:notificationCollection->insertOne(notification);
+        
+        log:printInfo("Cancellation notification created for " + allUsers.length().toString() + " users");
 
         // Send email notifications if there are recipients
         if emailRecipients.length() > 0 {
+            log:printInfo("Sending cancellation emails to " + emailRecipients.length().toString() + " recipients");
+            
             // Collect email addresses for all recipients
             map<string> participantEmails = check collectParticipantEmails(emailRecipients);
+            
+            log:printInfo("Email addresses collected for " + participantEmails.length().toString() + " users");
 
             // Send email notifications
             error? emailResult = sendEmailNotifications(notification, meeting, participantEmails);
@@ -453,7 +468,11 @@ service /api on ln {
             if emailResult is error {
                 log:printError("Failed to send email notifications for cancellation", emailResult);
                 // Continue execution even if email sending fails
+            } else {
+                log:printInfo("Cancellation email sending process completed successfully");
             }
+        } else {
+            log:printInfo("No email recipients found for cancellation notification");
         }
 
         // Note: We no longer delete meeting assignments and availabilities
@@ -461,9 +480,14 @@ service /api on ln {
 
         return {
             "status": "success",
-            "message": "Meeting canceled successfully"
+            "message": "Meeting canceled successfully",
+            "notificationsSent": allUsers.length(),
+            "emailsSent": emailRecipients.length(),
+            "participants": allUsers
         };
     }
+  
+  
   
   
     //endpoint to fetch notifications
@@ -1231,55 +1255,54 @@ service /api on ln {
                 availabilities.push(avail);
             };
 
-        // Check for a suggested best time in temporarySuggestionsCollection
-        map<json> suggestedTimeFilter = {
+        // Check if there's a best time slot found for this meeting
+        map<json> bestTimeSlotFilter = {
             "meetingId": meetingId
         };
 
-        record {}|() suggestedTimeRecord = check mongodb:temporarySuggestionsCollection->findOne(suggestedTimeFilter);
+        record {}|() bestTimeSlotRecord = check mongodb:bestTimeSlotCollection->findOne(bestTimeSlotFilter);
 
-        // If there's a suggested best time, mark the corresponding time slots
-        if (suggestedTimeRecord is record {}) {
-            json suggestedTimeJson = suggestedTimeRecord.toJson();
-            if (suggestedTimeJson is map<json> && (<map<json>>suggestedTimeJson).hasKey("suggestedTimeSlot")) {
-                json suggestedTimeSlotJson = check suggestedTimeJson.suggestedTimeSlot;
-                TimeSlot suggestedTimeSlot = check suggestedTimeSlotJson.cloneWithType(TimeSlot);
+        // If there's a best time slot, mark the corresponding time slots
+        if (bestTimeSlotRecord is record {}) {
+            json bestTimeSlotJson = bestTimeSlotRecord.toJson();
+            BestTimeSlot bestTimeSlotData = check bestTimeSlotJson.cloneWithType(BestTimeSlot);
+            TimeSlot bestTimeSlot = bestTimeSlotData.timeSlot;
 
-                // Mark the best time slot in each participant's availability
-                foreach int i in 0 ..< availabilities.length() {
-                    TimeSlot[] timeSlots = availabilities[i].timeSlots;
-                    TimeSlot[] updatedTimeSlots = [];
+            // Mark the best time slot in each participant's availability
+            foreach int i in 0 ..< availabilities.length() {
+                TimeSlot[] timeSlots = availabilities[i].timeSlots;
+                TimeSlot[] updatedTimeSlots = [];
 
-                    foreach TimeSlot slot in timeSlots {
-                        // Create a copy of the time slot
-                        TimeSlot updatedSlot = slot.clone();
+                foreach TimeSlot slot in timeSlots {
+                    // Create a copy of the time slot
+                    TimeSlot updatedSlot = {
+                        startTime: slot.startTime,
+                        endTime: slot.endTime,
+                        isBestTimeSlot: false
+                    };
 
-                        // Check if this is the suggested best time slot
-                        if (slot.startTime == suggestedTimeSlot.startTime &&
-                            slot.endTime == suggestedTimeSlot.endTime) {
-                            // Mark this as the best time slot by adding a flag
-                            json updatedSlotJson = slot.toJson();
-                            map<json> slotMap = <map<json>>updatedSlotJson;
-                            slotMap["isBestTimeSlot"] = true;
-                            updatedSlot = check slotMap.cloneWithType(TimeSlot);
-                        }
-
-                        updatedTimeSlots.push(updatedSlot);
+                    // Check if this is the best time slot
+                    if (slot.startTime == bestTimeSlot.startTime &&
+                        slot.endTime == bestTimeSlot.endTime) {
+                        // Mark this as the best time slot
+                        updatedSlot.isBestTimeSlot = true;
                     }
 
-                    // Update the time slots with the marked best time slot
-                    availabilities[i].timeSlots = updatedTimeSlots;
+                    updatedTimeSlots.push(updatedSlot);
                 }
 
-                // Create a response object that includes both the availabilities and the best time slot
-                http:Response enhancedResponse = new;
-                enhancedResponse.setJsonPayload({
-                    "availabilities": availabilities.toJson(),
-                    "bestTimeSlot": suggestedTimeSlotJson,
-                    "hasSuggestedTime": true
-                });
-                return enhancedResponse;
+                // Update the time slots with the marked best time slot
+                availabilities[i].timeSlots = updatedTimeSlots;
             }
+
+            // Create a response object that includes both the availabilities and the best time slot
+            http:Response enhancedResponse = new;
+            enhancedResponse.setJsonPayload({
+                "availabilities": availabilities.toJson(),
+                "bestTimeSlot": bestTimeSlotData.toJson(),
+                "hasBestTimeSlot": true
+            });
+            return enhancedResponse;
         }
 
         // If no best time slot was found, return just the availabilities array
@@ -1449,6 +1472,11 @@ service /api on ln {
             check checkAndNotifyParticipantsForRoundRobin(meetingData);
         }
 
+        // Check for 80% participant availability threshold and find best time slot
+        if (meetingData.meetingType == "group" || meetingData.meetingType == "round_robin") {
+            check checkParticipantAvailabilityAndFindBestSlot(meetingData);
+        }
+
         // For any meeting type, check if deadline has passed and find the best time slot
         check checkAndFinalizeTimeSlot(meetingData);
 
@@ -1555,66 +1583,33 @@ service /api on ln {
                 availabilities.push(avail);
             };
 
-        // Check for a suggested best time in temporarySuggestionsCollection
-        if (isCreatorOrHost) {
-            map<json> suggestedTimeFilter = {
-                "meetingId": meetingId
+        // Check for best time slot in bestTimeSlotCollection for all users
+        map<json> bestTimeSlotFilter = {
+            "meetingId": meetingId
+        };
+
+        record {}|() bestTimeSlotRecord = check mongodb:bestTimeSlotCollection->findOne(bestTimeSlotFilter);
+
+        // If there's a best time slot, include it in the response
+        if (bestTimeSlotRecord is record {}) {
+            json bestTimeSlotJson = bestTimeSlotRecord.toJson();
+            json timeSlotJson = check bestTimeSlotJson.timeSlot;
+
+            // Create enhanced response with best time slot metadata
+            json availabilitiesJson = check availabilities.toJson().cloneWithType(json);
+
+            map<json> responseJson = {
+                "availabilities": availabilitiesJson,
+                "bestTimeSlot": timeSlotJson,
+                "hasBestTimeSlot": true
             };
 
-            record {}|() suggestedTimeRecord = check mongodb:temporarySuggestionsCollection->findOne(suggestedTimeFilter);
-
-            // If there's a suggested best time, mark the corresponding time slots
-            if (suggestedTimeRecord is record {}) {
-                json suggestedTimeJson = suggestedTimeRecord.toJson();
-                json suggestedTimeSlotJson = check suggestedTimeJson.suggestedTimeSlot;
-                TimeSlot suggestedTimeSlot = check suggestedTimeSlotJson.cloneWithType(TimeSlot);
-
-                // Mark the best time slot in each participant's availability
-                foreach int i in 0 ..< availabilities.length() {
-                    TimeSlot[] timeSlots = availabilities[i].timeSlots;
-                    TimeSlot[] updatedTimeSlots = [];
-
-                    foreach TimeSlot slot in timeSlots {
-                        // Create a copy of the time slot
-                        TimeSlot updatedSlot = slot.clone();
-
-                        // Check if this is the suggested best time slot
-                        if (slot.startTime == suggestedTimeSlot.startTime &&
-                            slot.endTime == suggestedTimeSlot.endTime) {
-                            // Mark this as the best time slot by adding a flag
-                            json updatedSlotJson = slot.toJson();
-                            map<json> slotMap = <map<json>>updatedSlotJson;
-                            slotMap["isBestTimeSlot"] = true;
-                            updatedSlot = check slotMap.cloneWithType(TimeSlot);
-                        }
-
-                        updatedTimeSlots.push(updatedSlot);
-                    }
-
-                    // Update the time slots with the marked best time slot
-                    availabilities[i].timeSlots = updatedTimeSlots;
-                }
-
-                // Add the best time slot as a metadata property to the response
-                // Since we can't directly modify the return type, we'll include it in a custom field
-                json availabilitiesJson = check availabilities.toJson().cloneWithType(json);
-
-                // Create a response object that includes both the availabilities and the best time slot
-                map<json> responseJson = {
-                    "availabilities": availabilitiesJson,
-                    "bestTimeSlot": suggestedTimeSlotJson,
-                    "hasSuggestedTime": true
-                };
-
-                // Return the enhanced response
-                http:Response enhancedResponse = new;
-                enhancedResponse.setJsonPayload(responseJson);
-                return enhancedResponse;
-            }
+            http:Response enhancedResponse = new;
+            enhancedResponse.setJsonPayload(responseJson);
+            return enhancedResponse;
         }
 
-        // If no best time slot was found or the user is not a creator/host,
-        // return the regular availabilities array
+        // If no best time slot found, return regular availabilities array
         return availabilities;
     }
 
@@ -1901,25 +1896,25 @@ service /api on ln {
         // Check if payload has timeSlot
         map<json> payload = <map<json>>jsonPayload;
         if !payload.hasKey("timeSlot") {
-            // Get the suggested time from temporary collection if no timeSlot provided
-            map<json> suggestedTimeFilter = {
+            // Get the best time slot from best time slot collection if no timeSlot provided
+            map<json> bestTimeSlotFilter = {
                 "meetingId": meetingId
             };
 
-            record {}|() suggestedTimeRecord = check mongodb:temporarySuggestionsCollection->findOne(suggestedTimeFilter);
+            record {}|() bestTimeSlotRecord = check mongodb:bestTimeSlotCollection->findOne(bestTimeSlotFilter);
 
-            if suggestedTimeRecord is () {
+            if bestTimeSlotRecord is () {
                 http:Response response = new;
                 response.statusCode = 404;
                 response.setJsonPayload({
-                    message: "No suggested time found for this meeting and no time slot provided"
+                    message: "No best time slot found for this meeting and no time slot provided"
                 });
                 return response;
             }
 
-            json suggestedTimeJson = (<record {}>suggestedTimeRecord).toJson();
-            json suggestedTimeSlotJson = check suggestedTimeJson.suggestedTimeSlot;
-            timeSlot = check suggestedTimeSlotJson.cloneWithType(TimeSlot);
+            json bestTimeSlotJson = (<record {}>bestTimeSlotRecord).toJson();
+            json timeSlotJson = check bestTimeSlotJson.timeSlot;
+            timeSlot = check timeSlotJson.cloneWithType(TimeSlot);
         } else {
             // Use the provided time slot
             json timeSlotJson = payload["timeSlot"];
@@ -1981,8 +1976,7 @@ service /api on ln {
         Notification notification = {
             id: uuid:createType1AsString(),
             title: meeting.title + " Confirmed",
-            message: "The meeting \"" + meeting.title + "\" has been confirmed for " +
-                    timeSlot.startTime + " to " + timeSlot.endTime + ".",
+            message: "The meeting \"" + meeting.title + "\" has been confirmed.",
             notificationType: "confirmation",
             meetingId: meetingId,
             toWhom: recipients,
@@ -1995,24 +1989,15 @@ service /api on ln {
         // Handle email notifications
         string[] emailRecipients = [];
         foreach string recipient in recipients {
-            // Get user's notification settings
-            map<json> settingsFilter = {
-                "username": recipient
-            };
-
-            record {}|() settingsRecord = check mongodb:notificationSettingsCollection->findOne(settingsFilter);
-
-            if settingsRecord is record {} {
-                json settingsJson = settingsRecord.toJson();
-                NotificationSettings settings = check settingsJson.cloneWithType(NotificationSettings);
-
-                if settings.email_notifications {
-                    emailRecipients.push(recipient);
-                }
-            }
+            // For CONFIRMATION notifications, we want to send emails to ALL users regardless of their settings
+            // because confirmations are important information that should always reach participants
+            emailRecipients.push(recipient);
+            log:printInfo("Added " + recipient + " to email recipients (confirmation - always send)");
         }
 
         if emailRecipients.length() > 0 {
+            log:printInfo("Sending confirmation emails to " + emailRecipients.length().toString() + " recipients");
+            
             // Update meeting object for email notification
             meeting.directTimeSlot = timeSlot;
             meeting.status = "confirmed";
@@ -2026,14 +2011,24 @@ service /api on ln {
             if emailResult is error {
                 log:printError("Failed to send email notifications for confirmation", emailResult);
                 // Continue execution even if email sending fails
+            } else {
+                log:printInfo("Confirmation email sending process completed successfully");
             }
+        } else {
+            log:printInfo("No email recipients found for confirmation notification");
         }
 
-        // Clean up the temporary suggestion if it exists
+        // Clean up the temporary suggestion and best time slot records
         map<json> suggestedTimeFilter = {
             "meetingId": meetingId
         };
         _ = check mongodb:temporarySuggestionsCollection->deleteOne(suggestedTimeFilter);
+        
+        // Also clean up best time slot record after confirmation
+        map<json> bestTimeSlotFilter = {
+            "meetingId": meetingId
+        };
+        _ = check mongodb:bestTimeSlotCollection->deleteOne(bestTimeSlotFilter);
 
         return {
             "status": "success",
@@ -2131,7 +2126,6 @@ service /api on ln {
 
     return meetings;
 }
-
 
     // Updated endpoint to get meeting details by ID with cookie authentication
     resource function get meetings/[string meetingId](http:Request req) returns Meeting|ErrorResponse|error {
@@ -2868,37 +2862,525 @@ service /api on ln {
         };
     }
 
-    // Google OAuth endpoints
-    resource function get google/auth(http:Caller caller, http:Request req) returns error? {
-        string googleAuthUrl = "https://accounts.google.com/oauth2/auth?" +
-            "client_id=" + googleClientId +
-            "&redirect_uri=" + googleRedirectUri +
-            "&scope=" + googleCalendarScopes +
-            "&response_type=code" +
-            "&access_type=offline" +
-            "&prompt=consent";
-        
-        http:Response response = new;
-        response.statusCode = 302;
-        response.setHeader("Location", googleAuthUrl);
-        check caller->respond(response);
+    // Endpoint for participants to submit availability (different from hosts)
+    resource function post participant/availability(http:Request req) returns ParticipantAvailability|ErrorResponse|error {
+        // Extract username from cookie
+        string? username = check validateAndGetUsernameFromCookie(req);
+        if username is () {
+            log:printError("POST /participant/availability: Authentication failed - no valid username from cookie");
+            return {
+                message: "Unauthorized: Invalid or missing authentication token",
+                statusCode: 401
+            };
+        }
+
+        log:printInfo(string `POST /participant/availability: Starting participant availability submission for user: ${username}`);
+
+        // Parse the request payload
+        json|http:ClientError jsonPayload = req.getJsonPayload();
+        if jsonPayload is http:ClientError {
+            log:printError(string `POST /participant/availability: Invalid payload for user ${username}: ${jsonPayload.message()}`);
+            return {
+                message: "Invalid request payload: " + jsonPayload.message(),
+                statusCode: 400
+            };
+        }
+
+        log:printInfo(string `POST /participant/availability: Successfully parsed payload for user ${username}`);
+        log:printInfo(string `POST /participant/availability: Raw payload: ${jsonPayload.toString()}`);
+
+        ParticipantAvailability payload = check jsonPayload.cloneWithType(ParticipantAvailability);
+
+        // Ensure the username in the payload matches the authenticated user
+        payload.username = username;
+
+        // Generate an ID if not provided
+        if (payload.id == "") {
+            payload.id = uuid:createType1AsString();
+            log:printInfo(string `POST /participant/availability: Generated new participant availability ID: ${payload.id} for user ${username}`);
+        } else {
+            log:printInfo(string `POST /participant/availability: Using provided participant availability ID: ${payload.id} for user ${username}`);
+        }
+
+        log:printInfo(string `POST /participant/availability: Participant availability payload details - MeetingId: ${payload.meetingId}, Username: ${payload.username}, TimeSlots count: ${payload.timeSlots.length()}`);
+
+        // Log time slots details
+        foreach int i in 0 ..< payload.timeSlots.length() {
+            TimeSlot slot = payload.timeSlots[i];
+            log:printInfo(string `POST /participant/availability: TimeSlot ${i + 1} - Start: ${slot.startTime}, End: ${slot.endTime}`);
+        }
+
+        // Check if the meeting exists
+        map<json> meetingFilter = {
+            "id": payload.meetingId
+        };
+
+        log:printInfo(string `POST /participant/availability: Checking if meeting exists with ID: ${payload.meetingId}`);
+
+        record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
+        if meetingRecord is () {
+            log:printError(string `POST /participant/availability: Meeting not found with ID: ${payload.meetingId} for user ${username}`);
+            return {
+                message: "Meeting not found",
+                statusCode: 404
+            };
+        }
+
+        log:printInfo(string `POST /participant/availability: Meeting found with ID: ${payload.meetingId}`);
+
+        // Convert to Meeting type
+        json meetingJson = meetingRecord.toJson();
+        Meeting meeting = check meetingJson.cloneWithType(Meeting);
+
+        log:printInfo(string `POST /participant/availability: Meeting details - Type: ${meeting.meetingType}, Creator: ${meeting.createdBy}, Title: ${meeting.title}`);
+
+        // Verify user's role in the meeting (must be participant)
+        boolean isParticipant = false;
+
+        // Check if user is in the participants list
+        if (meeting?.participants is MeetingParticipant[]) {
+            MeetingParticipant[] participants = <MeetingParticipant[]>meeting?.participants;
+            log:printInfo(string `POST /participant/availability: Checking participants list (${participants.length()} participants)`);
+            foreach MeetingParticipant participant in meeting?.participants ?: [] {
+                log:printInfo(string `POST /participant/availability: Checking participant: ${participant.username}`);
+                if (participant.username == username) {
+                    isParticipant = true;
+                    log:printInfo(string `POST /participant/availability: User ${username} found in participants list`);
+                    break;
+                }
+            }
+        } else {
+            log:printInfo(string `POST /participant/availability: No participants list found in meeting or participants list is empty`);
+        }
+
+        if (!isParticipant) {
+            log:printError(string `POST /participant/availability: User ${username} is not authorized - not a participant of meeting ${payload.meetingId}`);
+            return {
+                message: "Unauthorized: Only meeting participants can submit availability via this endpoint",
+                statusCode: 403
+            };
+        }
+
+        log:printInfo(string `POST /participant/availability: User ${username} authorized as participant for meeting ${payload.meetingId}`);
+
+        // Check if availability already exists for this user and meeting in PARTICIPANT AVAILABILITY COLLECTION
+        map<json> availFilter = {
+            "username": username,
+            "meetingId": payload.meetingId
+        };
+
+        log:printInfo(string `POST /participant/availability: Checking for existing availability in participantAvailabilityCollection for user ${username} and meeting ${payload.meetingId}`);
+
+        record {}|() existingAvailability = check mongodb:participantAvailabilityCollection->findOne(availFilter);
+
+        if existingAvailability is () {
+            log:printInfo(string `POST /participant/availability: No existing availability found - will INSERT new record in participantAvailabilityCollection`);
+            
+            // Insert new availability into PARTICIPANT AVAILABILITY COLLECTION
+            var insertResult = mongodb:participantAvailabilityCollection->insertOne(payload);
+            
+            if insertResult is error {
+                log:printError(string `POST /participant/availability: CRITICAL ERROR - Failed to insert participant availability for ${username}: ${insertResult.message()}`);
+                return {
+                    message: "Failed to save availability: " + insertResult.message(),
+                    statusCode: 500
+                };
+            } else {
+                log:printInfo(string `POST /participant/availability: Successfully INSERTED new participant availability for ${username}`);
+                log:printInfo(string `POST /participant/availability: Insert operation completed successfully`);
+            }
+        } else {
+            log:printInfo(string `POST /participant/availability: Existing availability found - will UPDATE existing record in participantAvailabilityCollection`);
+            
+            // Update existing availability in PARTICIPANT AVAILABILITY COLLECTION
+            mongodb:Update updateOperation = {
+                "set": {"timeSlots": <json>payload.timeSlots}
+            };
+            
+            var updateResult = mongodb:participantAvailabilityCollection->updateOne(availFilter, updateOperation);
+            
+            if updateResult is error {
+                log:printError(string `POST /participant/availability: CRITICAL ERROR - Failed to update participant availability for ${username}: ${updateResult.message()}`);
+                return {
+                    message: "Failed to update availability: " + updateResult.message(),
+                    statusCode: 500
+                };
+            } else {
+                mongodb:UpdateResult result = <mongodb:UpdateResult>updateResult;
+                log:printInfo(string `POST /participant/availability: Successfully UPDATED participant availability for ${username}`);
+                log:printInfo(string `POST /participant/availability: Update result - Modified count: ${result.modifiedCount}`);
+            }
+        }
+
+        // After participant submits availability, check for 80% threshold and find best time slot
+        if (meeting.meetingType == "group" || meeting.meetingType == "round_robin") {
+            log:printInfo(string `POST /participant/availability: Checking for 80% threshold and best time slot for ${meeting.meetingType} meeting`);
+            
+            // Use do-on-fail for proper error handling
+            do {
+                check checkParticipantAvailabilityAndFindBestSlot(meeting);
+                log:printInfo(string `POST /participant/availability: Successfully checked participant availability threshold for meeting ${meeting.id}`);
+            } on fail error e {
+                log:printError(string `POST /participant/availability: Error in checkParticipantAvailabilityAndFindBestSlot: ${e.message()}`);
+            }
+        }
+
+        log:printInfo(string `POST /participant/availability: Successfully completed participant availability submission for ${username} on meeting ${payload.meetingId}`);
+
+        return payload;
     }
 
-    // Separate endpoint for calendar-specific authorization
-    resource function get google/calendar/auth(http:Caller caller, http:Request req) returns error? {
-        string calendarAuthUrl = "https://accounts.google.com/oauth2/auth?" +
-            "client_id=" + googleClientId +
-            "&redirect_uri=" + googleCalendarRedirectUri +
-            "&scope=https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/calendar.events" +
-            "&response_type=code" +
-            "&access_type=offline" +
-            "&prompt=consent";
+    // endpoint to cancel meetings (DELETE method)
+    resource function delete meetings/[string meetingId](http:Request req) returns json|http:Response|error {
+        // Extract username from cookie
+        string? username = check validateAndGetUsernameFromCookie(req);
+        if username is () {
+            http:Response response = new;
+            response.statusCode = 401;
+            response.setJsonPayload({
+                message: "Unauthorized: Invalid or missing authentication token"
+            });
+            return response;
+        }
+
+        // Get the meeting to check if user has permission to cancel
+        map<json> filter = {
+            "id": meetingId
+        };
+
+        record {}|() rawMeeting = check mongodb:meetingCollection->findOne(filter);
+        if rawMeeting is () {
+            http:Response response = new;
+            response.statusCode = 404;
+            response.setJsonPayload({
+                message: "Meeting not found"
+            });
+            return response;
+        }
+
+        // Convert to Meeting type
+        json meetingJson = rawMeeting.toJson();
+        Meeting meeting = check meetingJson.cloneWithType(Meeting);
+
+        // Check if the user is the creator or a host
+        boolean hasPermission = false;
+
+        if meeting.createdBy == username {
+            hasPermission = true;
+        } else if meeting.meetingType == "round_robin" && meeting?.hosts is MeetingParticipant[] {
+            foreach MeetingParticipant host in meeting?.hosts ?: [] {
+                if host.username == username {
+                    hasPermission = true;
+                    break;
+                }
+            }
+        }
+
+        if !hasPermission {
+            http:Response response = new;
+            response.statusCode = 403;
+            response.setJsonPayload({
+                message: "Unauthorized: Only meeting creators or hosts can cancel meetings"
+            });
+            return response;
+        }
+
+        // Collect all related users for notification
+        string[] allUsers = [];
+        string[] emailRecipients = [];
         
-        http:Response response = new;
-        response.statusCode = 302;
-        response.setHeader("Location", calendarAuthUrl);
-        check caller->respond(response);
+        // Add creator to users
+        allUsers.push(meeting.createdBy);
+
+        // Add participants to users
+        foreach MeetingParticipant participant in meeting?.participants ?: [] {
+            allUsers.push(participant.username);
+        }
+
+        // Add hosts to users if it's a round robin meeting
+        if meeting.meetingType == "round_robin" && meeting?.hosts is MeetingParticipant[] {
+            foreach MeetingParticipant host in meeting?.hosts ?: [] {
+                // Check if the host is not already in the list (e.g., if creator is also a host)
+                boolean alreadyExists = false;
+                foreach string existingUser in allUsers {
+                    if existingUser == host.username {
+                        alreadyExists = true;
+                        break;
+                    }
+                }
+
+                if !alreadyExists {
+                    allUsers.push(host.username);
+                }
+            }
+        }
+
+        foreach string userUsername in allUsers {
+            // Get user's notification settings
+            map<json> settingsFilter = {
+                "username": userUsername
+            };
+
+            record {}|() settingsRecord = check mongodb:notificationSettingsCollection->findOne(settingsFilter);
+
+            if settingsRecord is record {} {
+                json settingsJson = settingsRecord.toJson();
+                NotificationSettings settings = check settingsJson.cloneWithType(NotificationSettings);
+
+                if settings.email_notifications {
+                    emailRecipients.push(userUsername);
+                }
+            }
+        }
+
+        // Create cancellation notification
+        Notification notification = {
+            id: uuid:createType1AsString(),
+            title: meeting.title + " Canceled",
+            message: "The meeting \"" + meeting.title + "\" has been canceled.",
+            notificationType: "cancellation",
+            meetingId: meetingId,
+            toWhom: allUsers,
+            createdAt: time:utcToString(time:utcNow()) // Add the current time as ISO string
+        };
+
+        // Insert notification
+        _ = check mongodb:notificationCollection->insertOne(notification);
+
+        // Delete meeting and all related records
+
+        // 1. Delete the meeting
+        _ = check mongodb:meetingCollection->deleteOne(filter);
+
+        if emailRecipients.length() > 0 {
+            // Collect email addresses for all recipients
+            map<string> participantEmails = check collectParticipantEmails(emailRecipients);
+
+            // Send email notifications
+            error? emailResult = sendEmailNotifications(notification, meeting, participantEmails);
+
+            if emailResult is error {
+                log:printError("Failed to send email notifications for cancellation", emailResult);
+                // Continue execution even if email sending fails
+            }
+        }
+
+        // 2. Delete meeting assignments
+        map<json> assignmentFilter = {
+            "meetingId": meetingId
+        };
+        _ = check mongodb:meetinguserCollection->deleteMany(assignmentFilter);
+
+        // 3. Delete availabilities
+        map<json> availabilityFilter = {
+            "meetingId": meetingId
+        };
+        _ = check mongodb:availabilityCollection->deleteMany(availabilityFilter);
+
+        return {
+            "status": "success",
+            "message": "Meeting canceled successfully"
+        };
     }
+
+    resource function post availability/externally(http:Request req) returns Availability|ErrorResponse|error {
+        // Parse the request payload
+        json|http:ClientError jsonPayload = req.getJsonPayload();
+        if jsonPayload is http:ClientError {
+            return {
+                message: "Invalid request payload: " + jsonPayload.message(),
+                statusCode: 400
+            };
+        }
+
+        ExternalAvailabilityRequest payload = check jsonPayload.cloneWithType(ExternalAvailabilityRequest);
+
+        // Check if the meeting exists
+        map<json> meetingFilter = {
+            "id": payload.meetingId
+        };
+
+        record {}|() meeting = check mongodb:meetingCollection->findOne(meetingFilter);
+        if meeting is () {
+            return {
+                message: "Meeting not found",
+                statusCode: 404
+            };
+        }
+
+        // Create new availability record
+        Availability availability = {
+            id: uuid:createType1AsString(),
+            username: payload.userId, // Use the provided userId as username
+            meetingId: payload.meetingId,
+            timeSlots: payload.timeSlots
+        };
+
+        // Check if availability already exists
+        map<json> availFilter = {
+            "username": payload.userId,
+            "meetingId": payload.meetingId
+        };
+
+        record {}|() existingAvailability = check mongodb:participantAvailabilityCollection->findOne(availFilter);
+
+        if existingAvailability is () {
+            // Insert new availability
+            _ = check mongodb:participantAvailabilityCollection->insertOne(availability);
+        } else {
+            return {
+                message: "Availability already exists for this user and meeting",
+                statusCode: 409
+            };
+        }
+
+        return availability;
+    }
+
+    resource function put availability/externally(http:Request req) returns Availability|ErrorResponse|error {
+        // Parse the request payload
+        json|http:ClientError jsonPayload = req.getJsonPayload();
+        if jsonPayload is http:ClientError {
+            return {
+                message: "Invalid request payload: " + jsonPayload.message(),
+                statusCode: 400
+            };
+        }
+
+        ExternalAvailabilityRequest payload = check jsonPayload.cloneWithType(ExternalAvailabilityRequest);
+
+        // Check if the meeting exists
+        map<json> meetingFilter = {
+            "id": payload.meetingId
+        };
+
+        record {}|() meeting = check mongodb:meetingCollection->findOne(meetingFilter);
+        if meeting is () {
+            return {
+                message: "Meeting not found",
+                statusCode: 404
+            };
+        }
+
+        // Check if availability exists
+        map<json> availFilter = {
+            "username": payload.userId,
+            "meetingId": payload.meetingId
+        };
+
+        record {}|() existingAvailability = check mongodb:participantAvailabilityCollection->findOne(availFilter);
+
+        if existingAvailability is () {
+            return {
+                message: "Availability not found for this user and meeting",
+                statusCode: 404
+            };
+        }
+
+        // Update the availability
+        mongodb:Update updateOperation = {
+            "set": {
+                "timeSlots": check payload.timeSlots.cloneWithType(json) // Convert TimeSlot[] to json
+            }
+        };
+
+        _ = check mongodb:participantAvailabilityCollection->updateOne(availFilter, updateOperation);
+
+        // Return the updated availability
+        Availability updatedAvailability = {
+            id: (existingAvailability["id"]).toString(),
+            username: payload.userId,
+            meetingId: payload.meetingId,
+            timeSlots: payload.timeSlots
+        };
+
+        return updatedAvailability;
+    }
+
+    // External endpoint to get participant availability for a meeting
+    resource function get participant/availability/externally/[string userId]/[string meetingId]() returns ParticipantAvailability|ErrorResponse|error {
+        // Check if the meeting exists
+        map<json> meetingFilter = {
+            "id": meetingId
+        };
+
+        record {}|() meeting = check mongodb:meetingCollection->findOne(meetingFilter);
+        if meeting is () {
+            return {
+                message: "Meeting not found",
+                statusCode: 404
+            };
+        }
+
+        // Create a filter to find availability for this specific user and meeting
+        map<json> filter = {
+            "username": userId,
+            "meetingId": meetingId
+        };
+
+        // Query the participant availability collection
+        record {}|() availabilityRecord = check mongodb:participantAvailabilityCollection->findOne(filter);
+        
+        if availabilityRecord is () {
+            return {
+                message: "No availability found for this user and meeting",
+                statusCode: 404
+            };
+        }
+
+        // Convert to ParticipantAvailability type and add required fields
+        json availJson = availabilityRecord.toJson();
+        map<json> availJsonMap = <map<json>>availJson;
+
+        // Add submittedAt if not present
+        if !availJsonMap.hasKey("submittedAt") {
+            availJsonMap["submittedAt"] = time:utcToString(time:utcNow());
+        }
+
+        ParticipantAvailability availability = check availJsonMap.cloneWithType(ParticipantAvailability);
+        return availability;
+    }
+
+    // Public endpoint to get basic meeting details without authentication
+    resource function get meetings/externally/[string meetingId]() returns ExternalMeeting|ErrorResponse|error {
+        // Create a filter to find the meeting by ID
+        map<json> filter = {
+            "id": meetingId
+        };
+
+        // Query the meeting
+        record {}|() rawMeeting = check mongodb:meetingCollection->findOne(filter);
+
+        if rawMeeting is () {
+            return {
+                message: "Meeting not found",
+                statusCode: 404
+            };
+        }
+
+        // Convert to Meeting type first
+        json meetingJson = rawMeeting.toJson();
+        Meeting fullMeeting = check meetingJson.cloneWithType(Meeting);
+
+        // Create ExternalMeeting response with duration
+        ExternalMeeting externalMeeting = {
+            title: fullMeeting.title,
+            location: fullMeeting.location,
+            description: fullMeeting.description,
+            createdBy: fullMeeting.createdBy,
+            hosts: fullMeeting?.hosts,
+            participants: fullMeeting?.participants ?: [],
+            meetingType: fullMeeting.meetingType
+        };
+
+        // Add duration based on meeting type
+        if fullMeeting.meetingType == "group" {
+            externalMeeting.duration = fullMeeting?.groupDuration ?: "";
+        } else if fullMeeting.meetingType == "round_robin" {
+            externalMeeting.duration = fullMeeting?.roundRobinDuration ?: "";
+        }
+
+        return externalMeeting;
+    }
+  
 }
-
-
