@@ -83,6 +83,13 @@ service /api on ln {
         _ = check mongodb:meetingCollection->insertOne(meeting);
         _ = check mongodb:meetinguserCollection->insertOne(meetingAssignment);
 
+        // Send emails to unregistered participants after meeting is created
+        error? emailResult = sendEmailsToUnregisteredParticipants(meeting);
+        if emailResult is error {
+            log:printError("Failed to send emails to unregistered participants", emailResult);
+            // Continue execution even if email sending fails
+        }
+
         //Check if the meeting time is in the future
         TimeSlot _ = payload.directTimeSlot;
 
@@ -91,11 +98,11 @@ service /api on ln {
             meetingId,
             meeting.title,
             "direct",
-            participants
+            participants,
+            username
         );
 
-        // Add the creator to the notification recipients
-        notification.toWhom.push(username);
+        // Creator is already included in the notification
 
         // Insert the notification
         _ = check mongodb:notificationCollection->insertOne(notification);
@@ -161,6 +168,13 @@ service /api on ln {
         _ = check mongodb:meetingCollection->insertOne(meeting);
         _ = check mongodb:meetinguserCollection->insertOne(meetingAssignment);
 
+        // Send emails to unregistered participants after meeting is created
+        error? emailResult = sendEmailsToUnregisteredParticipants(meeting);
+        if emailResult is error {
+            log:printError("Failed to send emails to unregistered participants", emailResult);
+            // Continue execution even if email sending fails
+        }
+
         // Store creator's availability in the availability collection
         Availability creatorAvailability = {
             id: uuid:createType1AsString(),
@@ -176,11 +190,11 @@ service /api on ln {
             meetingId,
             meeting.title,
             "group",
-            participants
+            participants,
+            username
         );
 
-        // Add the creator to the notification recipients
-        notification.toWhom.push(username);
+        // Creator is already included in the notification
 
         // Insert the notification
         _ = check mongodb:notificationCollection->insertOne(notification);
@@ -275,17 +289,24 @@ service /api on ln {
         // Insert the meeting into MongoDB
         _ = check mongodb:meetingCollection->insertOne(meeting);
 
+        // Send emails to unregistered participants after meeting is created
+        error? emailResult = sendEmailsToUnregisteredParticipants(meeting);
+        if emailResult is error {
+            log:printError("Failed to send emails to unregistered participants", emailResult);
+            // Continue execution even if email sending fails
+        }
+
         // Create and insert notification for registered participants only
         Notification notification = check createMeetingNotificationWithMixedParticipants(
             meetingId,
             meeting.title,
             "round_robin",
             participants,
+            username,
             hosts
         );
 
-        // Add the creator to the notification recipients
-        notification.toWhom.push(username);
+        // Creator is already included in the notification
 
         // Insert the notification
         _ = check mongodb:notificationCollection->insertOne(notification);
@@ -1936,6 +1957,26 @@ service /api on ln {
 
         // Notify all participants about the confirmed time
         string[] recipients = [];
+
+        // Check if confirmation notification already exists to prevent duplicates
+        map<json> existingConfirmationFilter = {
+            "meetingId": meetingId,
+            "notificationType": "confirmation"
+        };
+
+        record {}|() existingConfirmation = check mongodb:notificationCollection->findOne(existingConfirmationFilter);
+        
+        if existingConfirmation is record {} {
+            // Confirmation notification already sent
+            http:Response response = new;
+            response.statusCode = 200;
+            response.setJsonPayload({
+                "status": "success",
+                "message": "Meeting already confirmed, no duplicate notification sent",
+                "meetingId": meetingId
+            });
+            return response;
+        }
 
         // Add creator
         recipients.push(meeting.createdBy);

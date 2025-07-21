@@ -407,6 +407,19 @@ public function findBestTimeSlotForParticipants(Meeting meeting) returns TimeSlo
 public function sendBestTimeSlotNotification(Meeting meeting, TimeSlot bestSlot, float participationPercentage) returns error? {
     log:printInfo(string `Sending best time slot notification for meeting ${meeting.id}`);
 
+    // Check if best time slot notification already exists to prevent duplicates
+    map<json> existingBestTimeSlotFilter = {
+        "meetingId": meeting.id,
+        "notificationType": "best_timeslot_found"
+    };
+
+    record {}|() existingBestTimeSlot = check mongodb:notificationCollection->findOne(existingBestTimeSlotFilter);
+    
+    if existingBestTimeSlot is record {} {
+        log:printInfo(string `Best time slot notification already exists for meeting ${meeting.id}, skipping duplicate`);
+        return;
+    }
+
     // Determine recipients (creator and hosts for round robin)
     string[] recipients = [meeting.createdBy];
 
@@ -1678,8 +1691,6 @@ public function processParticipantsWithEmails(string creatorUsername, string[] p
     }
 
     MeetingParticipant[] processedParticipants = [];
-    string[] unregisteredParticipants = [];
-    map<string> participantEmails = {};
 
     // Process each participant
     foreach string participantId in participantIds {
@@ -1701,21 +1712,6 @@ public function processParticipantsWithEmails(string creatorUsername, string[] p
         string contactUsername = check contactJson.username.ensureType();
         string contactEmail = check contactJson.email.ensureType();
 
-        // Store email for later use
-        participantEmails[contactUsername] = contactEmail;
-
-        // Check if this contact is a registered user
-        map<json> userFilter = {
-            "username": contactUsername
-        };
-
-        record {}|() userRecord = check mongodb:userCollection->findOne(userFilter);
-
-        if userRecord is () {
-            // Unregistered user - add to unregistered list
-            unregisteredParticipants.push(contactUsername);
-        }
-
         // Add to processed participants regardless of registration status
         processedParticipants.push({
             username: contactUsername,
@@ -1724,22 +1720,49 @@ public function processParticipantsWithEmails(string creatorUsername, string[] p
         });
     }
 
+    return processedParticipants;
+}
+
+// New function to send emails to unregistered participants after meeting creation
+public function sendEmailsToUnregisteredParticipants(Meeting meeting) returns error? {
+    string[] unregisteredParticipants = [];
+    map<string> participantEmails = {};
+
+    // Check all participants to see which ones are unregistered
+    foreach MeetingParticipant participant in meeting?.participants ?: [] {
+        // Check if this participant is a registered user
+        map<json> userFilter = {
+            "username": participant.username
+        };
+
+        record {}|() userRecord = check mongodb:userCollection->findOne(userFilter);
+
+        if userRecord is () {
+            // Unregistered user - add to unregistered list
+            unregisteredParticipants.push(participant.username);
+            if participant?.email is string {
+                participantEmails[participant.username] = <string>participant?.email;
+            }
+        }
+    }
+
     // Send appropriate emails to unregistered participants
     if unregisteredParticipants.length() > 0 {
-        error? emailResult = sendUnregisteredParticipantEmails(
+        error? emailResult = sendUnregisteredParticipantEmailsWithMeeting(
                 unregisteredParticipants,
                 participantEmails,
-                meetingId,
-                meetingType
+                meeting
         );
 
         if emailResult is error {
             log:printError("Failed to send emails to unregistered participants", emailResult);
-            // Continue execution even if email sending fails
+            return emailResult;
+        } else {
+            log:printInfo("Sent external invitation emails to " + unregisteredParticipants.length().toString() + " unregistered participants for meeting: " + meeting.title);
         }
     }
 
-    return processedParticipants;
+    return;
 }
 
 // Function to send emails to unregistered participants with appropriate links
@@ -1807,7 +1830,7 @@ public function sendUnregisteredParticipantEmails(string[] unregisteredUsernames
 
         if meetingType == "direct" {
             meetingLink = string `${emailConfig.frontendUrl}/exmeetingdetails/${meetingId}`;
-            emailSubject = "[AutoMeet] You've been invited to a meeting: " + meeting.title;
+            emailSubject = "You've been invited to a meeting: " + meeting.title;
             emailBody = string `You have been invited to a meeting: "${meeting.title}"
             
 </br>Meeting Details</br>
@@ -1834,7 +1857,7 @@ No registration required. You can view the meeting information directly.`;
 
         } else { // group or round_robin
             meetingLink = string `${emailConfig.frontendUrl}/exavailability/${externalUserId}/${meetingId}`;
-            emailSubject = "[AutoMeet] Please mark your availability: " + meeting.title;
+            emailSubject = "Please mark your availability: " + meeting.title;
             emailBody = string `You have been invited to a meeting: "${meeting.title}"
             
 </br>Meeting Details</br>
@@ -1879,9 +1902,133 @@ No registration required. Simply select your available time slots to help us fin
     return;
 }
 
+// Function to send emails to unregistered participants with Meeting object (avoiding database lookup)
+public function sendUnregisteredParticipantEmailsWithMeeting(string[] unregisteredUsernames, map<string> participantEmails, Meeting meeting) returns error? {
+
+    EmailConfig emailConfig = {
+        host: "smtp.gmail.com",
+        username: "automeetitfac@gmail.com",
+        password: "psec mnvm mevn rfuj",
+        frontendUrl: "http://localhost:3000"
+    };
+
+    // Create SMTP configuration for Gmail
+    email:SmtpConfiguration smtpConfig = {
+        port: 587,
+        security: email:START_TLS_AUTO
+    };
+
+    email:SmtpClient|error smtpClient = new (emailConfig.host, emailConfig.username, emailConfig.password, smtpConfig);
+
+    if smtpClient is error {
+        log:printError("Failed to create SMTP client", smtpClient);
+        return smtpClient;
+    }
+
+    foreach string username in unregisteredUsernames {
+        if !participantEmails.hasKey(username) {
+            log:printWarn("No email address found for unregistered user: " + username);
+            continue;
+        }
+
+        string recipientEmail = participantEmails[username] ?: "";
+
+        // Generate UUID for external user
+        string externalUserId = uuid:createType1AsString();
+
+        // Store the external user mapping for future reference
+        ExternalUserMapping userMapping = {
+            id: uuid:createType1AsString(),
+            externalUserId: externalUserId,
+            email: recipientEmail,
+            meetingId: meeting.id,
+            createdAt: time:utcToString(time:utcNow())
+        };
+
+        _ = check mongodb:externalUserMappingCollection->insertOne(userMapping);
+
+        // Generate appropriate link based on meeting type
+        string meetingLink;
+        string emailSubject;
+        string emailBody;
+
+        if meeting.meetingType == "direct" {
+            meetingLink = string `${emailConfig.frontendUrl}/exmeetingdetails/${meeting.id}`;
+            emailSubject = "You've been invited to a meeting: " + meeting.title;
+            emailBody = string `You have been invited to a meeting: "${meeting.title}"
+            
+</br>Meeting Details</br>
+- Location: ${meeting.location}
+- Description: ${meeting.description}
+- Type: Direct Meeting`;
+
+            // Add time information if available
+            if meeting?.directTimeSlot is TimeSlot {
+                TimeSlot timeSlot = <TimeSlot>meeting?.directTimeSlot;
+                string sriLankanStartTime = convertToSriLankanTime(timeSlot.startTime);
+                string sriLankanEndTime = convertToSriLankanTime(timeSlot.endTime);
+                emailBody = emailBody + string `
+- Start: ${sriLankanStartTime}
+- End: ${sriLankanEndTime}`;
+            }
+
+            emailBody = emailBody + string `
+
+Click the link below to view the meeting details :
+${meetingLink}
+
+No registration required. You can view the meeting information directly.`;
+
+        } else { // group or round_robin
+            meetingLink = string `${emailConfig.frontendUrl}/exavailability/${externalUserId}/${meeting.id}`;
+            emailSubject = "Please mark your availability: " + meeting.title;
+            emailBody = string `You have been invited to a meeting: "${meeting.title}"
+            
+</br>Meeting Details</br>
+- Location: ${meeting.location}
+- Description: ${meeting.description}
+- Type: ${meeting.meetingType == "group" ? "Group Meeting" : "Round Robin Meeting"}`;
+
+            // Add duration information if available
+            if meeting.meetingType == "group" && meeting?.groupDuration is string {
+                emailBody = emailBody + string `
+- Duration: ${meeting?.groupDuration ?: ""}`;
+            } else if meeting.meetingType == "round_robin" && meeting?.roundRobinDuration is string {
+                emailBody = emailBody + string `
+- Duration: ${meeting?.roundRobinDuration ?: ""}`;
+            }
+
+            emailBody = emailBody + string `
+
+Please click the link below to mark your availability:
+${meetingLink}
+
+No registration required. Simply select your available time slots to help us find the best meeting time for everyone.`;
+        }
+
+        // Create and send email
+        email:Message emailMsg = {
+            to: recipientEmail,
+            subject: emailSubject,
+            body: emailBody,
+            htmlBody: getUnregisteredUserHtmlEmail(meeting.title, emailBody, meetingLink, meeting.meetingType)
+        };
+
+        error? sendResult = smtpClient->sendMessage(emailMsg);
+
+        if sendResult is error {
+            log:printError("Failed to send email to unregistered user " + recipientEmail, sendResult);
+        } else {
+            log:printInfo("Email sent successfully to unregistered user " + recipientEmail);
+        }
+    }
+
+    return;
+}
+
 // HTML email template for unregistered users
 public function getUnregisteredUserHtmlEmail(string meetingTitle, string textContent, string meetingLink, MeetingType meetingType) returns string {
-    string actionText = meetingType == "direct" ? "📅 View Meeting Details" : "📝 Mark Your Availability";
+    string actionText = meetingType == "direct" ? "View Meeting Details" : "Mark Your Availability";
     string instructionText = meetingType == "direct" ?
         "Click below to view the meeting details" :
         "Click below to select your available time slots";
@@ -2024,10 +2171,10 @@ public function getUnregisteredUserHtmlEmail(string meetingTitle, string textCon
                     <div class="tagline">You're Invited!</div>
                 </div>
                 <div class="content">
-                    <h2 class="meeting-title">${meetingTitle}</h2>
+                    <h2 class="meeting-title">Meeting Title: ${meetingTitle}</h2>
                     
                     <div class="invitation-notice">
-                        <strong>🎉 Meeting Invitation</strong><br>
+                        <strong>Meeting Invitation</strong><br>
                         ${instructionText} - no account registration required!
                     </div>
                     
@@ -2042,7 +2189,7 @@ public function getUnregisteredUserHtmlEmail(string meetingTitle, string textCon
                     </div>
                     
                     <div class="no-registration">
-                        <strong>✨ No Registration Required</strong><br>
+                        <strong>No Registration Required</strong><br>
                         Simply click the button above to participate. It's that easy!
                     </div>
                 </div>
@@ -2065,8 +2212,23 @@ public function createMeetingNotificationWithMixedParticipants(
         string meetingTitle,
         MeetingType meetingType,
         MeetingParticipant[] participants,
+        string creatorUsername,
         MeetingParticipant[]? hosts = ()
 ) returns Notification|error {
+
+    // Check if a notification for this meeting has already been sent to prevent duplicates
+    map<json> existingNotificationFilter = {
+        "meetingId": meetingId,
+        "notificationType": "creation"
+    };
+
+    record {}|() existingNotification = check mongodb:notificationCollection->findOne(existingNotificationFilter);
+    
+    if existingNotification is record {} {
+        // Notification already exists, return it without creating a new one
+        json notificationJson = existingNotification.toJson();
+        return check notificationJson.cloneWithType(Notification);
+    }
 
     // Separate registered and unregistered participants
     string[] registeredParticipants = [];
@@ -2143,19 +2305,19 @@ public function createMeetingNotificationWithMixedParticipants(
         }
     }
 
-    // Log information about unregistered participants (emails already sent in processParticipantsWithEmails)
+    // Log information about unregistered participants (emails now sent separately via sendEmailsToUnregisteredParticipants)
     if unregisteredParticipants.length() > 0 {
-        log:printInfo(string `Sent external invitation emails to ${unregisteredParticipants.length()} unregistered participants for meeting: ${meetingTitle}`);
+        log:printInfo(string `Found ${unregisteredParticipants.length()} unregistered participants for meeting: ${meetingTitle}`);
     }
 
     // Return a notification representing the overall process
     return {
         id: uuid:createType1AsString(),
         title: meetingTitle,
-        message: string `Meeting notifications sent to ${registeredParticipants.length()} registered and ${unregisteredParticipants.length()} unregistered participants`,
+        message: string `Meeting notifications sent.`,
         notificationType: "creation",
         meetingId: meetingId,
-        toWhom: registeredParticipants,
+        toWhom: [creatorUsername], // Only send to meeting creator
         createdAt: time:utcToString(time:utcNow())
     };
 }
