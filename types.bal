@@ -105,6 +105,7 @@ public type Meeting record {
     boolean deadlineNotificationSent = false;
     string? canceledBy?;
     string? canceledAt?;
+    string? google_calendar_event_id?;
 };
 
 public type MeetingContent record {
@@ -376,4 +377,36 @@ public type BestTimeSlot record {
     int totalParticipants;
     string foundAt;
     string[] notifiedUsers;
+};
+
+// Calendar Event Types
+public type CalendarEventRequest record {
+    string title;
+    string description?;
+    string location?;
+    string startTime;
+    string endTime;
+    string[] attendees?;
+    string meetingId;
+};
+
+public type CalendarEventResponse record {
+    boolean success;
+    string? eventId?;
+    string? message?;
+};
+
+public type CalendarEventUpdateRequest record {
+    string title;
+    string description?;
+    string location?;
+    string startTime;
+    string endTime;
+    string[] attendees?;
+};
+
+public type SyncExistingMeetingsResponse record {
+    boolean success;
+    int syncedCount;
+    string? message?;
 };

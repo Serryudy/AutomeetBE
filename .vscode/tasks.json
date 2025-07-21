@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build and Run AutoMeet Backend",
+			"type": "shell",
+			"command": "bal run",
+			"group": "build",
+			"isBackground": true,
+			"problemMatcher": [
+				"$ballerina"
+			]
+		}
+	]
+}
