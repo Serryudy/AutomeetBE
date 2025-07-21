@@ -1013,16 +1013,16 @@ public function sendEmailNotifications(Notification notification, Meeting meetin
             if notification.notificationType == "availability_request" {
                 // Generate a UUID for external user
                 string externalUserId = uuid:createType1AsString();
-                meetingLink = string ${emailConfig.frontendUrl}/exavailability/${externalUserId}/${meeting.id};
+                meetingLink = emailConfig.frontendUrl + "/exavailability/" + externalUserId + "/" + meeting.id;
             } else if notification.notificationType == "confirmation" ||
                     notification.notificationType == "cancellation" {
-                meetingLink = string ${emailConfig.frontendUrl}/exmeetingdetails/${meeting.id};
+                meetingLink = emailConfig.frontendUrl + "/exmeetingdetails/" + meeting.id;
             } else {
-                meetingLink = string ${emailConfig.frontendUrl}/exmeetingdetails/${meeting.id};
+                meetingLink = emailConfig.frontendUrl + "/exmeetingdetails/" + meeting.id;
             }
         } else {
             // Regular user - use normal meeting link
-            meetingLink = string ${emailConfig.frontendUrl}/meetingdetails/${meeting.id};
+            meetingLink = emailConfig.frontendUrl + "/meetingdetails/" + meeting.id;
         }
 
         // Get email template and customize it
@@ -1101,10 +1101,8 @@ public function sendEmailNotifications(Notification notification, Meeting meetin
         }
     }
 
-    return;
+    return;
 }
-
-
 public function getEmailTemplate(NotificationType notificationType, string meetingTitle) returns EmailTemplate {
     match notificationType {
         "creation" => {
