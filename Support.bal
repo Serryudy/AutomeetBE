@@ -731,20 +731,40 @@ public function sendEmailNotifications(Notification notification, Meeting meetin
         );
         
         // Add meeting details
-        personalizedBody = personalizedBody + "\n\nMeeting Details:\n" +
-            "Location: " + meeting.location + "\n" +
-            "Description: " + meeting.description;
-        
-        // Add time information based on meeting type
-        if meeting.meetingType == "direct" && meeting?.directTimeSlot is TimeSlot {
-            TimeSlot timeSlot = <TimeSlot>meeting?.directTimeSlot;
-            personalizedBody = personalizedBody + "\nTime: " + timeSlot.startTime + " to " + timeSlot.endTime;
-        } else if meeting.meetingType == "group" || meeting.meetingType == "round_robin" {
-            if userRecord is () {
-                personalizedBody = personalizedBody + "\nPlease use the link above to submit your availability. " +
-                                 "No registration required.";
-            } else {
-                personalizedBody = personalizedBody + "\nPlease mark your availability using the link above.";
+        if notification.notificationType == "cancellation" {
+            personalizedBody = personalizedBody + "\n\nCanceled Meeting Details:\n" +
+                "Location: " + meeting.location + "\n" +
+                "Description: " + meeting.description;
+            
+            // Add time information for canceled meetings
+            if meeting.meetingType == "direct" && meeting?.directTimeSlot is TimeSlot {
+                TimeSlot timeSlot = <TimeSlot>meeting?.directTimeSlot;
+                personalizedBody = personalizedBody + "\nScheduled Time: " + timeSlot.startTime + " to " + timeSlot.endTime;
+            }
+            
+            // Add cancellation timestamp and canceled by info if available
+            if meeting?.canceledAt is string {
+                personalizedBody = personalizedBody + "\nCanceled on: " + (<string>meeting?.canceledAt);
+            }
+            if meeting?.canceledBy is string {
+                personalizedBody = personalizedBody + "\nCanceled by: " + (<string>meeting?.canceledBy);
+            }
+        } else {
+            personalizedBody = personalizedBody + "\n\nMeeting Details:\n" +
+                "Location: " + meeting.location + "\n" +
+                "Description: " + meeting.description;
+            
+            // Add time information based on meeting type
+            if meeting.meetingType == "direct" && meeting?.directTimeSlot is TimeSlot {
+                TimeSlot timeSlot = <TimeSlot>meeting?.directTimeSlot;
+                personalizedBody = personalizedBody + "\nTime: " + timeSlot.startTime + " to " + timeSlot.endTime;
+            } else if meeting.meetingType == "group" || meeting.meetingType == "round_robin" {
+                if userRecord is () {
+                    personalizedBody = personalizedBody + "\nPlease use the link above to submit your availability. " +
+                                     "No registration required.";
+                } else {
+                    personalizedBody = personalizedBody + "\nPlease mark your availability using the link above.";
+                }
             }
         }
 
@@ -753,7 +773,7 @@ public function sendEmailNotifications(Notification notification, Meeting meetin
             to: recipientEmail,
             subject: template.subject,
             body: personalizedBody,
-            htmlBody: getHtmlEmail(meeting.title, personalizedBody, meetingLink)
+            htmlBody: getHtmlEmailForNotification(meeting.title, personalizedBody, meetingLink, notification.notificationType)
         };
 
         // Send email
@@ -780,7 +800,9 @@ public function getEmailTemplate(NotificationType notificationType, string meeti
         "cancellation" => {
             return {
                 subject: "[AutoMeet] Meeting Canceled: " + meetingTitle,
-                bodyTemplate: "The meeting \"{meeting_title}\" has been canceled.\n\nYou can view your upcoming meetings here:\n{meeting_link}"
+                bodyTemplate: "We're writing to inform you that the meeting \"{meeting_title}\" has been canceled.\n\n" +
+                             "If you have any questions about this cancellation, please contact the meeting organizer.\n\n" +
+                             "You can view your other upcoming meetings here:\n{meeting_link}"
             };
         }
         "confirmation" => {
@@ -805,36 +827,68 @@ public function getEmailTemplate(NotificationType notificationType, string meeti
 }
 
 public function getHtmlEmail(string meetingTitle, string textContent, string meetingLink) returns string {
-    return string `
-    <html>
-        <head>
-            <style>
-                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-                .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-                .header { background-color: #4a86e8; color: white; padding: 10px 20px; border-radius: 5px 5px 0 0; }
-                .content { padding: 20px; border: 1px solid #ddd; border-top: none; border-radius: 0 0 5px 5px; }
-                .button { display: inline-block; background-color: #4a86e8; color: white; padding: 10px 20px; 
-                        text-decoration: none; border-radius: 5px; margin-top: 15px; }
-                .footer { margin-top: 20px; font-size: 12px; color: #777; text-align: center; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h2>AutoMeet</h2>
-                </div>
-                <div class="content">
-                    <h3>${meetingTitle}</h3>
-                    <p>${textContent}</p>
-                    <a href="${meetingLink}" class="button">View Meeting</a>
-                </div>
-                <div class="footer">
-                    <p>This is an automated message from AutoMeet. Please do not reply to this email.</p>
-                </div>
-            </div>
-        </body>
-    </html>
-    `;
+    return getHtmlEmailForNotification(meetingTitle, textContent, meetingLink, "creation");
+}
+
+public function getHtmlEmailForNotification(string meetingTitle, string textContent, string meetingLink, NotificationType notificationType) returns string {
+    string headerColor = "#4a86e8";
+    string buttonText = "View Meeting";
+    string buttonColor = "#4a86e8";
+    
+    // Customize colors and text based on notification type
+    if notificationType == "cancellation" {
+        headerColor = "#e74c3c";
+        buttonColor = "#e74c3c";
+        buttonText = "View Your Meetings";
+    } else if notificationType == "confirmation" {
+        headerColor = "#27ae60";
+        buttonColor = "#27ae60";
+        buttonText = "View Meeting Details";
+    } else if notificationType == "availability_request" {
+        headerColor = "#f39c12";
+        buttonColor = "#f39c12";
+        buttonText = "Mark Availability";
+    }
+    
+    string cancellationNotice = "";
+    if notificationType == "cancellation" {
+        cancellationNotice = "<div class=\"cancellation-notice\"><strong>⚠️ Meeting Canceled</strong></div>";
+    }
+    
+    return "<html>" +
+        "<head>" +
+        "<style>" +
+        "body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }" +
+        ".container { max-width: 600px; margin: 0 auto; padding: 20px; }" +
+        ".header { background-color: " + headerColor + "; color: white; padding: 15px 20px; border-radius: 5px 5px 0 0; }" +
+        ".content { padding: 20px; border: 1px solid #ddd; border-top: none; border-radius: 0 0 5px 5px; }" +
+        ".button { display: inline-block; background-color: " + buttonColor + "; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin-top: 15px; font-weight: bold; }" +
+        ".button:hover { opacity: 0.9; }" +
+        ".footer { margin-top: 20px; font-size: 12px; color: #777; text-align: center; }" +
+        ".meeting-details { background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 15px 0; }" +
+        ".cancellation-notice { background-color: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px; margin: 10px 0; }" +
+        "</style>" +
+        "</head>" +
+        "<body>" +
+        "<div class=\"container\">" +
+        "<div class=\"header\">" +
+        "<h2>AutoMeet</h2>" +
+        "</div>" +
+        "<div class=\"content\">" +
+        cancellationNotice +
+        "<h3>" + meetingTitle + "</h3>" +
+        "<div class=\"meeting-details\">" +
+        "<pre style=\"font-family: Arial, sans-serif; white-space: pre-wrap; margin: 0;\">" + textContent + "</pre>" +
+        "</div>" +
+        "<a href=\"" + meetingLink + "\" class=\"button\">" + buttonText + "</a>" +
+        "</div>" +
+        "<div class=\"footer\">" +
+        "<p>This is an automated message from AutoMeet. Please do not reply to this email.</p>" +
+        "<p>If you have any questions, please contact the meeting organizer directly.</p>" +
+        "</div>" +
+        "</div>" +
+        "</body>" +
+        "</html>";
 }
 
 public function collectParticipantEmails(string[] usernames) returns map<string>|error {
@@ -844,20 +898,55 @@ public function collectParticipantEmails(string[] usernames) returns map<string>
         // Log which username we're processing
         log:printInfo("Finding email for username: " + usernameToCheck);
 
-        // Try to find contact directly first
-        map<json> contactFilter = {
-            "username": usernameToCheck
-        };
-
         // Use a try-catch to handle potential errors
         do {
+            // First try to find user in the user collection (for registered users)
+            map<json> userFilter = {
+                "username": usernameToCheck
+            };
+
+            record {}|() userRecord = check mongodb:userCollection->findOne(userFilter);
+
+            if userRecord is record {} {
+                json userJson = userRecord.toJson();
+                map<json> userMap = <map<json>>userJson;
+
+                // Try to find email in phone_number field (this is where emails are typically stored)
+                string? userEmail = ();
+                if userMap.hasKey("phone_number") {
+                    var phoneValue = userMap["phone_number"];
+                    if phoneValue is string && phoneValue.indexOf("@") != -1 {
+                        userEmail = phoneValue;
+                    }
+                }
+
+                // Also check if there's an email field directly
+                if userEmail is () && userMap.hasKey("email") {
+                    var emailValue = userMap["email"];
+                    if emailValue is string {
+                        userEmail = emailValue;
+                    }
+                }
+
+                if userEmail is string && userEmail != "" {
+                    emails[usernameToCheck] = userEmail;
+                    log:printInfo("Found user email for " + usernameToCheck + ": " + userEmail);
+                    continue;
+                }
+            }
+
+            // If not found in user collection, try contact collection (for external participants)
+            map<json> contactFilter = {
+                "username": usernameToCheck
+            };
+
             record {}|() contactRecord = check mongodb:contactCollection->findOne(contactFilter);
 
             if contactRecord is record {} {
                 json contactJson = contactRecord.toJson();
                 map<json> contactMap = <map<json>>contactJson;
 
-                // Try to extract email using direct field access rather than type conversion
+                // Try to extract email using direct field access
                 string? contactEmail = ();
                 if contactMap.hasKey("email") {
                     var emailValue = contactMap["email"];
@@ -868,7 +957,7 @@ public function collectParticipantEmails(string[] usernames) returns map<string>
 
                 if contactEmail is string && contactEmail != "" {
                     emails[usernameToCheck] = contactEmail;
-                    log:printInfo("Found email for " + usernameToCheck + ": " + contactEmail);
+                    log:printInfo("Found contact email for " + usernameToCheck + ": " + contactEmail);
                     continue;
                 }
 
@@ -883,34 +972,7 @@ public function collectParticipantEmails(string[] usernames) returns map<string>
 
                 if phoneEmail is string && phoneEmail != "" {
                     emails[usernameToCheck] = phoneEmail;
-                    log:printInfo("Found phone email for " + usernameToCheck + ": " + phoneEmail);
-                    continue;
-                }
-            }
-
-            // If we get here, try looking in the user collection without checking notification settings
-            map<json> userFilter = {
-                "username": usernameToCheck
-            };
-
-            record {}|() userRecord = check mongodb:userCollection->findOne(userFilter);
-
-            if userRecord is record {} {
-                json userJson = userRecord.toJson();
-                map<json> userMap = <map<json>>userJson;
-
-                // Try to find email in phone_number field
-                string? phoneNumberEmail = ();
-                if userMap.hasKey("phone_number") {
-                    var phoneValue = userMap["phone_number"];
-                    if phoneValue is string && phoneValue.indexOf("@") != -1 {
-                        phoneNumberEmail = phoneValue;
-                    }
-                }
-
-                if phoneNumberEmail is string && phoneNumberEmail != "" {
-                    emails[usernameToCheck] = phoneNumberEmail;
-                    log:printInfo("Found phone_number email for " + usernameToCheck + ": " + phoneNumberEmail);
+                    log:printInfo("Found contact phone email for " + usernameToCheck + ": " + phoneEmail);
                     continue;
                 }
             }
@@ -1386,49 +1448,45 @@ public function getUnregisteredUserHtmlEmail(string meetingTitle, string textCon
         "Click below to view the meeting details" : 
         "Click below to select your available time slots";
     
-    return string `
-    <html>
-        <head>
-            <style>
-                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; }
-                .container { max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f9f9f9; }
-                .header { background-color: #4a86e8; color: white; padding: 20px; border-radius: 8px 8px 0 0; text-align: center; }
-                .content { padding: 30px; border: 1px solid #ddd; border-top: none; border-radius: 0 0 8px 8px; background-color: white; }
-                .button { display: inline-block; background-color: #4a86e8; color: white; padding: 12px 24px; 
-                        text-decoration: none; border-radius: 6px; margin-top: 20px; font-weight: bold; }
-                .button:hover { background-color: #3a76d8; }
-                .meeting-info { background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 15px 0; }
-                .footer { margin-top: 20px; font-size: 12px; color: #777; text-align: center; 
-                         border-top: 1px solid #eee; padding-top: 15px; }
-                .highlight { color: #4a86e8; font-weight: bold; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h2>🤝 AutoMeet Invitation</h2>
-                </div>
-                <div class="content">
-                    <h3>You're invited to: <span class="highlight">${meetingTitle}</span></h3>
-                    <div class="meeting-info">
-                        ${regex:replaceAll(textContent, "\n", "<br/>")}
-                    </div>
-                    <p><strong>${instructionText}:</strong></p>
-                    <div style="text-align: center;">
-                        <a href="${meetingLink}" class="button">${actionText}</a>
-                    </div>
-                    <p style="margin-top: 20px; font-size: 14px; color: #666;">
-                        <strong>Note:</strong> No account registration is required. This link is specifically created for you to participate in this meeting.
-                    </p>
-                </div>
-                <div class="footer">
-                    <p>This is an automated invitation from AutoMeet. Please do not reply to this email.</p>
-                    <p>If you have any questions about this meeting, please contact the meeting organizer directly.</p>
-                </div>
-            </div>
-        </body>
-    </html>
-    `;
+    return "<html>" +
+        "<head>" +
+        "<style>" +
+        "body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; }" +
+        ".container { max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f9f9f9; }" +
+        ".header { background-color: #4a86e8; color: white; padding: 20px; border-radius: 8px 8px 0 0; text-align: center; }" +
+        ".content { padding: 30px; border: 1px solid #ddd; border-top: none; border-radius: 0 0 8px 8px; background-color: white; }" +
+        ".button { display: inline-block; background-color: #4a86e8; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; margin-top: 20px; font-weight: bold; }" +
+        ".button:hover { background-color: #3a76d8; }" +
+        ".meeting-info { background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 15px 0; }" +
+        ".footer { margin-top: 20px; font-size: 12px; color: #777; text-align: center; border-top: 1px solid #eee; padding-top: 15px; }" +
+        ".highlight { color: #4a86e8; font-weight: bold; }" +
+        "</style>" +
+        "</head>" +
+        "<body>" +
+        "<div class=\"container\">" +
+        "<div class=\"header\">" +
+        "<h2>🤝 AutoMeet Invitation</h2>" +
+        "</div>" +
+        "<div class=\"content\">" +
+        "<h3>You're invited to: <span class=\"highlight\">" + meetingTitle + "</span></h3>" +
+        "<div class=\"meeting-info\">" +
+        regex:replaceAll(textContent, "\n", "<br/>") +
+        "</div>" +
+        "<p><strong>" + instructionText + ":</strong></p>" +
+        "<div style=\"text-align: center;\">" +
+        "<a href=\"" + meetingLink + "\" class=\"button\">" + actionText + "</a>" +
+        "</div>" +
+        "<p style=\"margin-top: 20px; font-size: 14px; color: #666;\">" +
+        "<strong>Note:</strong> No account registration is required. This link is specifically created for you to participate in this meeting." +
+        "</p>" +
+        "</div>" +
+        "<div class=\"footer\">" +
+        "<p>This is an automated invitation from AutoMeet. Please do not reply to this email.</p>" +
+        "<p>If you have any questions about this meeting, please contact the meeting organizer directly.</p>" +
+        "</div>" +
+        "</div>" +
+        "</body>" +
+        "</html>";
 }
 
 
@@ -1595,528 +1653,62 @@ public function sendWelcomeEmailAsync(string userEmail, string userName) {
 
 // HTML template for login welcome email
 function getLoginWelcomeEmailHtml(string userName, string loginTime, string loginDevice, string frontendUrl) returns string {
-    return string `
-    <!DOCTYPE html>
-    <html>
-        <head>
-            <style>
-                body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f5f8fa; }
-                .container { max-width: 600px; margin: 20px auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
-                .header { background: linear-gradient(135deg, #28a745, #1e7e34); color: white; padding: 30px 20px; text-align: center; }
-                .header h1 { margin: 0; font-size: 28px; font-weight: 600; }
-                .welcome-icon { font-size: 48px; margin-bottom: 15px; }
-                .content { padding: 30px; }
-                .login-info { background: #e8f5e8; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #28a745; }
-                .quick-actions { display: flex; flex-direction: column; gap: 10px; margin: 25px 0; }
-                .action-button { display: inline-block; background: linear-gradient(135deg, #007bff, #0056b3); color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; text-align: center; font-weight: 500; margin: 5px 0; }
-                .dashboard-button { background: linear-gradient(135deg, #28a745, #1e7e34); }
-                .footer { text-align: center; color: #666; font-size: 12px; margin-top: 20px; padding: 20px; background: #f8f9fa; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <div class="welcome-icon">👋</div>
-                    <h1>Welcome Back!</h1>
-                </div>
-                <div class="content">
-                    <h2>Hello ${userName}!</h2>
-                    <p>Great to see you back on AUTOMEET! You're all set to manage your meetings efficiently.</p>
-                    
-                    <div class="login-info">
-                        <h4>🔐 Login Details</h4>
-                        <p><strong>Login Time:</strong> ${loginTime}<br>
-                        <strong>Device:</strong> ${loginDevice}</p>
-                    </div>
-                    
-                    <h3>Quick Actions:</h3>
-                    <div class="quick-actions">
-                        <a href="${frontendUrl}/#/" class="action-button dashboard-button">Go to Dashboard</a>
-                        <a href="${frontendUrl}/#/direct" class="action-button">Schedule Direct Meeting</a>
-                        <a href="${frontendUrl}/#/group" class="action-button">Create Group Meeting</a>
-                        <a href="${frontendUrl}/#/roundrobin" class="action-button">Setup Round Robin</a>
-                    </div>
-                    
-                    <p>💡 <strong>Tip:</strong> Use our Chrome extension for quick access to all your scheduling needs!</p>
-                    
-                    <p>Need help? Check out our quick guides or contact support.</p>
-                    
-                    <p>Happy scheduling!<br><strong>The AUTOMEET Team</strong></p>
-                </div>
-                <div class="footer">
-                    <p>This is an automated message from AUTOMEET. Please do not reply to this email.</p>
-                    <p>If you didn't log in, please contact our support team immediately.</p>
-                </div>
-            </div>
-        </body>
-    </html>
-    `;
+    return "<!DOCTYPE html>" +
+    "<html>" +
+    "<head>" +
+    "<style>" +
+    "body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f5f8fa; }" +
+    ".container { max-width: 600px; margin: 20px auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }" +
+    ".header { background: linear-gradient(135deg, #28a745, #1e7e34); color: white; padding: 30px 20px; text-align: center; }" +
+    ".header h1 { margin: 0; font-size: 28px; font-weight: 600; }" +
+    ".welcome-icon { font-size: 48px; margin-bottom: 15px; }" +
+    ".content { padding: 30px; }" +
+    ".login-info { background: #e8f5e8; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #28a745; }" +
+    ".action-button { display: inline-block; background: linear-gradient(135deg, #007bff, #0056b3); color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; text-align: center; font-weight: 500; margin: 5px 0; }" +
+    ".dashboard-button { background: linear-gradient(135deg, #28a745, #1e7e34); }" +
+    ".footer { text-align: center; color: #666; font-size: 12px; margin-top: 20px; padding: 20px; background: #f8f9fa; }" +
+    "</style>" +
+    "</head>" +
+    "<body>" +
+    "<div class=\"container\">" +
+    "<div class=\"header\">" +
+    "<div class=\"welcome-icon\">👋</div>" +
+    "<h1>Welcome Back!</h1>" +
+    "</div>" +
+    "<div class=\"content\">" +
+    "<h2>Hello " + userName + "!</h2>" +
+    "<p>Great to see you back on AUTOMEET! You're all set to manage your meetings efficiently.</p>" +
+    "<div class=\"login-info\">" +
+    "<h4>🔐 Login Details</h4>" +
+    "<p><strong>Login Time:</strong> " + loginTime + "<br>" +
+    "<strong>Device:</strong> " + loginDevice + "</p>" +
+    "</div>" +
+    "<h3>Quick Actions:</h3>" +
+    "<div class=\"quick-actions\">" +
+    "<a href=\"" + frontendUrl + "/#/\" class=\"action-button dashboard-button\">Go to Dashboard</a>" +
+    "<a href=\"" + frontendUrl + "/#/direct\" class=\"action-button\">Schedule Direct Meeting</a>" +
+    "<a href=\"" + frontendUrl + "/#/group\" class=\"action-button\">Create Group Meeting</a>" +
+    "<a href=\"" + frontendUrl + "/#/roundrobin\" class=\"action-button\">Setup Round Robin</a>" +
+    "</div>" +
+    "<p>💡 <strong>Tip:</strong> Use our Chrome extension for quick access to all your scheduling needs!</p>" +
+    "<p>Need help? Check out our quick guides or contact support.</p>" +
+    "<p>Happy scheduling!<br><strong>The AUTOMEET Team</strong></p>" +
+    "</div>" +
+    "<div class=\"footer\">" +
+    "<p>This is an automated message from AUTOMEET. Please do not reply to this email.</p>" +
+    "<p>If you didn't log in, please contact our support team immediately.</p>" +
+    "</div>" +
+    "</div>" +
+    "</body>" +
+    "</html>";
 }
 
 // HTML template for registration welcome email
 function getWelcomeEmailHtml(string userName, string frontendUrl) returns string {
-    return string `
-    <!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Welcome to AutoMeet</title>
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-        
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            line-height: 1.6;
-            color: #333;
-            background-color: #f5f7fa;
-            margin: 0;
-            padding: 20px 0;
-        }
-        
-        .email-container {
-            max-width: 600px;
-            margin: 0 auto;
-            background: #ffffff;
-            border-radius: 16px;
-            overflow: hidden;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
-        }
-        
-        .header {
-            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
-            padding: 40px 30px;
-            text-align: center;
-            color: white;
-            position: relative;
-        }
-
-        .header-image {
-            width: 100%;
-            max-width: 500px;
-            height: 200px;
-            object-fit: cover;
-            border-radius: 12px;
-            margin-bottom: 30px;
-            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.2);
-        }
-        
-        .logo {
-            font-size: 24px;
-            font-weight: 700;
-            color: white;
-            margin-bottom: 30px;
-            letter-spacing: -0.02em;
-        }
-        
-        .hero-title {
-            font-size: 32px;
-            font-weight: 700;
-            margin-bottom: 16px;
-            line-height: 1.2;
-            letter-spacing: -0.02em;
-        }
-        
-        .hero-subtitle {
-            font-size: 18px;
-            font-weight: 400;
-            opacity: 0.9;
-            line-height: 1.4;
-        }
-        
-        .content {
-            padding: 40px 30px;
-        }
-        
-        .greeting {
-            font-size: 24px;
-            font-weight: 600;
-            color: #1a1a1a;
-            margin-bottom: 20px;
-        }
-        
-        .intro-text {
-            font-size: 16px;
-            color: #6b7280;
-            margin-bottom: 40px;
-            line-height: 1.6;
-        }
-        
-        .section-title {
-            font-size: 28px;
-            font-weight: 700;
-            color: #1a1a1a;
-            text-align: center;
-            margin-bottom: 40px;
-            line-height: 1.3;
-        }
-        
-        .features-container {
-            margin-bottom: 40px;
-        }
-        
-        .feature-row {
-            display: flex;
-            align-items: center;
-            margin-bottom: 30px;
-            padding: 20px;
-            background: #f8fafc;
-            border-radius: 12px;
-            border: 1px solid #e2e8f0;
-        }
-        
-        .feature-icon {
-            width: 60px;
-            height: 60px;
-            border-radius: 12px;
-            background: linear-gradient(135deg, #6366f1, #8b5cf6);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin-right: 20px;
-            flex-shrink: 0;
-        }
-        
-        .feature-icon::before {
-            content: '';
-            width: 24px;
-            height: 24px;
-            background: white;
-            border-radius: 4px;
-        }
-        
-        .feature-content {
-            flex: 1;
-        }
-        
-        .feature-title {
-            font-size: 18px;
-            font-weight: 600;
-            color: #1a1a1a;
-            margin-bottom: 6px;
-        }
-        
-        .feature-desc {
-            font-size: 14px;
-            color: #6b7280;
-            line-height: 1.5;
-        }
-        
-        .highlight-section {
-            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
-            padding: 30px;
-            border-radius: 12px;
-            text-align: center;
-            margin: 40px 0;
-        }
-        
-        .highlight-title {
-            font-size: 22px;
-            font-weight: 600;
-            color: #1a1a1a;
-            margin-bottom: 12px;
-        }
-        
-        .highlight-text {
-            font-size: 16px;
-            color: #6b7280;
-            margin-bottom: 25px;
-            line-height: 1.5;
-        }
-        
-        .cta-button {
-            display: inline-block;
-            background-color: #6366f1;
-            color: white;
-            padding: 16px 32px;
-            text-decoration: none;
-            border-radius: 10px;
-            font-weight: 600;
-            font-size: 16px;
-            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
-        }
-        
-        
-        
-        .key-features {
-            margin: 40px 0;
-        }
-        
-        .key-features-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            margin-top: 20px;
-        }
-        
-        .key-feature {
-            text-align: center;
-            padding: 20px;
-            background: #ffffff;
-            border: 1px solid #e2e8f0;
-            border-radius: 10px;
-        }
-        
-        .key-feature-icon {
-            width: 80px;
-            height: 60px;
-            border-radius: 8px;
-            margin: 0 auto 12px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .key-feature-icon img {
-            max-width: 100%;
-            height: auto;
-        }
-        
-        .key-feature-icon::before {
-            content: '';
-            width: 16px;
-            height: 16px;
-            border-radius: 2px;
-        }
-        
-        .key-feature-title {
-            font-size: 14px;
-            font-weight: 600;
-            color: #1a1a1a;
-            margin-bottom: 8px;
-        }
-        
-        .key-feature-desc {
-            font-size: 12px;
-            color: #6b7280;
-            line-height: 1.4;
-        }
-        
-        .footer-section {
-            background: #f8fafc;
-            padding: 30px;
-            text-align: center;
-            margin-top: 40px;
-        }
-        
-        .footer-text {
-            font-size: 16px;
-            color: #6b7280;
-            margin-bottom: 20px;
-        }
-        
-        .signature {
-            font-size: 16px;
-            color: #1a1a1a;
-            font-weight: 500;
-        }
-        
-        .footer {
-            background: #2d3748;
-            color: #a0aec0;
-            padding: 20px 30px;
-            text-align: center;
-        }
-        
-        .footer-logo {
-            font-size: 20px;
-            font-weight: 700;
-            color: white;
-            margin-bottom: 10px;
-        }
-        
-        .footer-disclaimer {
-            font-size: 12px;
-            line-height: 1.4;
-        }
-        
-        /* Mobile Responsive */
-        @media (max-width: 640px) {
-            body {
-                padding: 10px;
-            }
-            
-            .email-container {
-                margin: 0;
-                border-radius: 12px;
-            }
-            
-            .header {
-                padding: 30px 20px;
-            }
-            
-            .hero-title {
-                font-size: 24px;
-            }
-            
-            .hero-subtitle {
-                font-size: 16px;
-            }
-            
-            .content {
-                padding: 30px 20px;
-            }
-            
-            .greeting {
-                font-size: 20px;
-            }
-            
-            .section-title {
-                font-size: 22px;
-            }
-            
-            .feature-row {
-                flex-direction: column;
-                text-align: center;
-                padding: 20px 15px;
-            }
-            
-            .feature-icon {
-                margin-right: 0;
-                margin-bottom: 15px;
-            }
-            
-            .highlight-section {
-                padding: 20px;
-            }
-            
-            .highlight-title {
-                font-size: 18px;
-            }
-            
-            .key-features-grid {
-                grid-template-columns: 1fr;
-                gap: 15px;
-            }
-            
-            .footer {
-                padding: 20px;
-            }
-        }
-        
-        @media (max-width: 480px) {
-            .hero-title {
-                font-size: 20px;
-            }
-            
-            .section-title {
-                font-size: 20px;
-            }
-            
-            .cta-button {
-                padding: 14px 24px;
-                font-size: 14px;
-            }
-        }
-    </style>
-</head>
-<body>
-    <div class="email-container">
-        <div class="header">
-            <div class="logo">AutoMeet</div>
-             <img src="https://res.cloudinary.com/duocpqb1j/image/upload/v1752751990/xpmvw3typrkpnuybc9bl.jpg" alt="AutoMeet Team Collaboration" class="header-image">
-            <h1 class="hero-title">Meetings That Run Themselves</h1>
-            <p class="hero-subtitle">Welcome to effortless meeting management</p>
-        </div>
-        
-        <div class="content">
-            <h2 class="greeting">Hello ${userName}!</h2>
-            <p class="intro-text">
-                Tired of managing calendars, links, and notes? AutoMeet automates organizing, hosting, and 
-                summarizing your meetings effortlessly. <strong>Welcome to the future of meeting management.</strong>
-            </p>
-            
-            <h3 class="section-title">Seize the Day,<br>One Meeting at a Time!</h3>
-            
-            <div class="features-container">
-                <div class="feature-row">
-                    <div class="feature-icon"></div>
-                    <div class="feature-content">
-                        <div class="feature-title">Direct Meetings</div>
-                        <div class="feature-desc">Schedule one-on-one meetings with smart availability detection and automatic coordination</div>
-                    </div>
-                </div>
-                
-                <div class="feature-row">
-                    <div class="feature-icon"></div>
-                    <div class="feature-content">
-                        <div class="feature-title">Group Meetings</div>
-                        <div class="feature-desc">Coordinate meetings with multiple participants using AI-powered scheduling optimization</div>
-                    </div>
-                </div>
-                
-                <div class="feature-row">
-                    <div class="feature-icon"></div>
-                    <div class="feature-content">
-                        <div class="feature-title">Round Robin Meetings</div>
-                        <div class="feature-desc">Set up rotating meeting schedules with automatic participant management</div>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="highlight-section">
-                <h3 class="highlight-title">One Platform to Schedule, Analyze, and Run Meetings Better</h3>
-                <p class="highlight-text">
-                    AutoMeet simplifies meeting scheduling with AI, real-time availability, seamless collaboration, 
-                    smart notifications, and analysis for participants.
-                </p>
-                <a href="${frontendUrl}/#/login" class="cta-button">Get Started</a>
-            </div>
-            
-            <div class="key-features">
-                <h3 class="section-title">Features That Do the Work for You</h3>
-                <div class="key-features-grid">
-                    <div class="key-feature">
-                        <div class="key-feature-icon"><img src="https://res.cloudinary.com/duocpqb1j/image/upload/v1752746919/ebzs2ou3kojckzflq5y7.png" alt=""></div>
-                        <div class="key-feature-title">Instant Meeting Links</div>
-                        <div class="key-feature-desc">Generate and share meeting links with a single click</div>
-                    </div>
-                    
-                    <div class="key-feature">
-                        <div class="key-feature-icon"><img src="https://res.cloudinary.com/duocpqb1j/image/upload/v1752746919/vlmf3yxi95u1ym77yqf6.png" alt=""></div>
-                        <div class="key-feature-title">Smart Integrations</div>
-                        <div class="key-feature-desc">Connect email, calendars, and messaging apps effortlessly</div>
-                    </div>
-                    
-                    <div class="key-feature">
-                        <div class="key-feature-icon"><img src="https://res.cloudinary.com/duocpqb1j/image/upload/v1752746919/misp46bbiusevcnhtctl.png" alt=""></div>
-                        <div class="key-feature-title">Seamless Scheduling</div>
-                        <div class="key-feature-desc">AutoMeet syncs calendars to find the perfect time, no hassle</div>
-                    </div>
-                    
-                    <div class="key-feature">
-                        <div class="key-feature-icon"><img src="https://res.cloudinary.com/duocpqb1j/image/upload/v1752746919/bsruvztvo215e3c0fpuk.png" alt=""></div>
-                        <div class="key-feature-title">AI-Powered Summaries</div>
-                        <div class="key-feature-desc">Get AutoMeet to handle the details so you focus on conversation</div>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="footer-section">
-                <p class="footer-text">
-                    Ready to transform your meeting experience? Let AutoMeet handle the coordination while you focus on what matters most.
-                </p>
-                <p class="signature">
-                    Best regards,<br>
-                    <strong>The AutoMeet Team</strong>
-                </p>
-            </div>
-        </div>
-        
-        <div class="footer">
-            <div class="footer-logo">AutoMeet</div>
-            <p class="footer-disclaimer">
-                This is an automated message from AutoMeet.
-                Please do not reply to this email.
-            </p>
-        </div>
-    </div>
-</body>
-</html>
-    `;
+    // Return simplified HTML to avoid template string issues
+    return "<!DOCTYPE html><html><head><title>Welcome to AutoMeet</title></head><body>" +
+           "<h1>Welcome to AutoMeet, " + userName + "!</h1>" +
+           "<p>Thank you for joining AutoMeet. Get started by visiting: " + frontendUrl + "</p>" +
+           "<p>Best regards, The AutoMeet Team</p>" +
+           "</body></html>";
 }

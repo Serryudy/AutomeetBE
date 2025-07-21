@@ -103,6 +103,8 @@ public type Meeting record {
     MeetingParticipant[]? hosts?;
     MeetingParticipant[]? participants?;
     boolean deadlineNotificationSent = false;
+    string? canceledBy?;
+    string? canceledAt?;
 };
 
 public type MeetingContent record {

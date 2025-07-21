@@ -579,23 +579,19 @@ resource function post login(http:Caller caller, http:Request req) returns error
         string token = check generateJwtToken(user);
         
         // Create HTML response with redirect
-        string htmlResponse = string `
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Login Successful</title>
-            <script>
-                // Redirect to application dashboard without storing token
-                // (token is managed by the HttpOnly cookie)
-                window.location.href = '${frontendBaseUrl}/';
-            </script>
-        </head>
-        <body>
-            <h2>Login Successful!</h2>
-            <p>Redirecting...</p>
-        </body>
-        </html>
-        `;
+        string htmlResponse = "<!DOCTYPE html>" +
+        "<html>" +
+        "<head>" +
+        "<title>Login Successful</title>" +
+        "<script>" +
+        "window.location.href = '" + frontendBaseUrl + "/';" +
+        "</script>" +
+        "</head>" +
+        "<body>" +
+        "<h2>Login Successful!</h2>" +
+        "<p>Redirecting...</p>" +
+        "</body>" +
+        "</html>";
         
         http:Response response = new;
         response.setTextPayload(htmlResponse);
@@ -744,22 +740,19 @@ resource function post login(http:Caller caller, http:Request req) returns error
         log:printInfo("Successfully connected calendar for user: " + username.toString());
         
         // Create HTML response with redirect to frontend
-        string htmlResponse = string `
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Calendar Connected</title>
-            <script>
-                // Redirect to application dashboard
-                window.location.href = '${frontendBaseUrl}/settings/calendarSync';
-            </script>
-        </head>
-        <body>
-            <h2>Google Calendar Connected Successfully!</h2>
-            <p>Redirecting to dashboard...</p>
-        </body>
-        </html>
-        `;
+        string htmlResponse = "<!DOCTYPE html>" +
+        "<html>" +
+        "<head>" +
+        "<title>Calendar Connected</title>" +
+        "<script>" +
+        "window.location.href = '" + frontendBaseUrl + "/settings/calendarSync';" +
+        "</script>" +
+        "</head>" +
+        "<body>" +
+        "<h2>Google Calendar Connected Successfully!</h2>" +
+        "<p>Redirecting to dashboard...</p>" +
+        "</body>" +
+        "</html>";
         
         http:Response response = new;
         response.setTextPayload(htmlResponse);

@@ -967,6 +967,412 @@ service /api/chat on ln {
             data: roomResponse
         };
     }
+
+    // Add members to a chatroom
+    resource function post rooms/[string roomId]/members(
+        http:Request req,
+        @http:Header {name: "Cookie"} string? cookieHeader
+    ) returns ApiResponse|error {
+        // Extract and validate the token
+        string userId = check validateUserFromCookie(cookieHeader);
+        log:printInfo(string `Adding members to room ${roomId} by user: ${userId}`);
+        
+        // Check if the user has access to this room
+        boolean hasAccess = check validateRoomAccess(userId, roomId);
+        
+        if !hasAccess {
+            return {
+                success: false,
+                message: "You don't have access to this room"
+            };
+        }
+        
+        // Parse the request payload to get new member usernames
+        json|http:ClientError jsonPayload = req.getJsonPayload();
+        if jsonPayload is http:ClientError {
+            return {
+                success: false,
+                message: "Invalid request payload: " + jsonPayload.message()
+            };
+        }
+        
+        // Extract member usernames from payload
+        string[] newMembers = [];
+        if jsonPayload is map<json> {
+            json? membersJson = jsonPayload["members"];
+            if membersJson is json[] {
+                foreach json member in membersJson {
+                    if member is string {
+                        newMembers.push(member);
+                    }
+                }
+            }
+        }
+        
+        if newMembers.length() == 0 {
+            return {
+                success: false,
+                message: "No valid members provided"
+            };
+        }
+        
+        // Get the current room
+        record{}|error|() roomResult = mongodb:chatroomCollection->findOne({id: roomId}, {});
+        
+        if roomResult is error {
+            log:printError("Database error when fetching room", roomResult);
+            return {
+                success: false,
+                message: "Failed to fetch room details"
+            };
+        }
+        
+        if roomResult is () {
+            return {
+                success: false,
+                message: "Room not found"
+            };
+        }
+        
+        // Convert to ChatRoom type
+        ChatRoom|error chatRoom = (<record{}>roomResult).cloneWithType(ChatRoom);
+        
+        if chatRoom is error {
+            log:printError("Error converting room data", chatRoom);
+            return {
+                success: false,
+                message: "Error processing room data"
+            };
+        }
+        
+        // Add new members to the participants list (avoid duplicates)
+        Participant[] currentParticipants = chatRoom.participants;
+        Participant[] updatedParticipants = [...currentParticipants];
+        string[] addedMembers = [];
+        
+        foreach string newMember in newMembers {
+            boolean alreadyExists = false;
+            
+            foreach Participant participant in currentParticipants {
+                if participant.username == newMember {
+                    alreadyExists = true;
+                    break;
+                }
+            }
+            
+            if !alreadyExists {
+                updatedParticipants.push({username: newMember});
+                addedMembers.push(newMember);
+            }
+        }
+        
+        if addedMembers.length() == 0 {
+            return {
+                success: false,
+                message: "All members are already in the room"
+            };
+        }
+        
+        // Update the room in database
+        mongodb:Update updateOperation = {
+            "set": {
+                "participants": updatedParticipants
+            }
+        };
+        
+        mongodb:UpdateResult|error updateResult = mongodb:chatroomCollection->updateOne(
+            {id: roomId},
+            updateOperation
+        );
+        
+        if updateResult is error {
+            log:printError("Database error when updating room", updateResult);
+            return {
+                success: false,
+                message: "Failed to add members to room"
+            };
+        }
+        
+        // Notify all connected clients about the new members
+        foreach string connId in connections.keys() {
+            string[]? roomIds = userRooms[connId];
+            
+            if roomIds is string[] {
+                boolean inRoom = false;
+                
+                foreach string id in roomIds {
+                    if id == roomId {
+                        inRoom = true;
+                        break;
+                    }
+                }
+                
+                if inRoom {
+                    websocket:Caller userCaller = connections.get(connId);
+                    json notificationMessage = {
+                        "_type": "members_added",
+                        "roomId": roomId,
+                        "addedMembers": addedMembers,
+                        "addedBy": userId,
+                        "timestamp": time:utcToString(time:utcNow())
+                    };
+                    
+                    // Safely send message
+                    do {
+                        check userCaller->writeMessage(notificationMessage);
+                    } on fail error e {
+                        log:printError("Failed to notify user about added members", e);
+                    }
+                }
+            }
+        }
+        
+        // Also notify the newly added members
+        foreach string newMember in addedMembers {
+            foreach string connId in connectionUsers.keys() {
+                if connectionUsers[connId] == newMember {
+                    websocket:Caller? memberCaller = connections[connId];
+                    if memberCaller is websocket:Caller {
+                        json invitationMessage = {
+                            "_type": "room_invitation",
+                            "roomId": roomId,
+                            "invitedBy": userId,
+                            "roomName": chatRoom.roomName,
+                            "timestamp": time:utcToString(time:utcNow())
+                        };
+                        
+                        do {
+                            check memberCaller->writeMessage(invitationMessage);
+                        } on fail error e {
+                            log:printError("Failed to notify new member about room invitation", e);
+                        }
+                    }
+                }
+            }
+        }
+        
+        return {
+            success: true,
+            message: string `Successfully added ${addedMembers.length()} members to the room`,
+            data: {
+                "addedMembers": addedMembers
+            }
+        };
+    }
+
+    // Remove members from a chatroom
+    resource function delete rooms/[string roomId]/members(
+        http:Request req,
+        @http:Header {name: "Cookie"} string? cookieHeader
+    ) returns ApiResponse|error {
+        // Extract and validate the token
+        string userId = check validateUserFromCookie(cookieHeader);
+        log:printInfo(string `Removing members from room ${roomId} by user: ${userId}`);
+        
+        // Check if the user has access to this room
+        boolean hasAccess = check validateRoomAccess(userId, roomId);
+        
+        if !hasAccess {
+            return {
+                success: false,
+                message: "You don't have access to this room"
+            };
+        }
+        
+        // Parse the request payload to get member usernames to remove
+        json|http:ClientError jsonPayload = req.getJsonPayload();
+        if jsonPayload is http:ClientError {
+            return {
+                success: false,
+                message: "Invalid request payload: " + jsonPayload.message()
+            };
+        }
+        
+        // Extract member usernames from payload
+        string[] membersToRemove = [];
+        if jsonPayload is map<json> {
+            json? membersJson = jsonPayload["members"];
+            if membersJson is json[] {
+                foreach json member in membersJson {
+                    if member is string {
+                        membersToRemove.push(member);
+                    }
+                }
+            }
+        }
+        
+        if membersToRemove.length() == 0 {
+            return {
+                success: false,
+                message: "No valid members provided for removal"
+            };
+        }
+        
+        // Get the current room
+        record{}|error|() roomResult = mongodb:chatroomCollection->findOne({id: roomId}, {});
+        
+        if roomResult is error {
+            log:printError("Database error when fetching room", roomResult);
+            return {
+                success: false,
+                message: "Failed to fetch room details"
+            };
+        }
+        
+        if roomResult is () {
+            return {
+                success: false,
+                message: "Room not found"
+            };
+        }
+        
+        // Convert to ChatRoom type
+        ChatRoom|error chatRoom = (<record{}>roomResult).cloneWithType(ChatRoom);
+        
+        if chatRoom is error {
+            log:printError("Error converting room data", chatRoom);
+            return {
+                success: false,
+                message: "Error processing room data"
+            };
+        }
+        
+        // Remove members from the participants list
+        Participant[] currentParticipants = chatRoom.participants;
+        Participant[] updatedParticipants = [];
+        string[] removedMembers = [];
+        
+        foreach Participant participant in currentParticipants {
+            boolean shouldRemove = false;
+            
+            foreach string memberToRemove in membersToRemove {
+                if participant.username == memberToRemove {
+                    shouldRemove = true;
+                    removedMembers.push(memberToRemove);
+                    break;
+                }
+            }
+            
+            if !shouldRemove {
+                updatedParticipants.push(participant);
+            }
+        }
+        
+        if removedMembers.length() == 0 {
+            return {
+                success: false,
+                message: "None of the specified members were found in the room"
+            };
+        }
+        
+        // Check if removing members would leave the room empty
+        if updatedParticipants.length() == 0 {
+            return {
+                success: false,
+                message: "Cannot remove all members from the room"
+            };
+        }
+        
+        // Update the room in database
+        mongodb:Update updateOperation = {
+            "set": {
+                "participants": updatedParticipants
+            }
+        };
+        
+        mongodb:UpdateResult|error updateResult = mongodb:chatroomCollection->updateOne(
+            {id: roomId},
+            updateOperation
+        );
+        
+        if updateResult is error {
+            log:printError("Database error when updating room", updateResult);
+            return {
+                success: false,
+                message: "Failed to remove members from room"
+            };
+        }
+        
+        // Notify all remaining connected clients in the room about the removed members
+        foreach string connId in connections.keys() {
+            string[]? roomIds = userRooms[connId];
+            
+            if roomIds is string[] {
+                boolean inRoom = false;
+                
+                foreach string id in roomIds {
+                    if id == roomId {
+                        inRoom = true;
+                        break;
+                    }
+                }
+                
+                if inRoom {
+                    websocket:Caller userCaller = connections.get(connId);
+                    json notificationMessage = {
+                        "_type": "members_removed",
+                        "roomId": roomId,
+                        "removedMembers": removedMembers,
+                        "removedBy": userId,
+                        "timestamp": time:utcToString(time:utcNow())
+                    };
+                    
+                    // Safely send message
+                    do {
+                        check userCaller->writeMessage(notificationMessage);
+                    } on fail error e {
+                        log:printError("Failed to notify user about removed members", e);
+                    }
+                }
+            }
+        }
+        
+        // Notify removed members that they've been removed from the room
+        foreach string removedMember in removedMembers {
+            foreach string connId in connectionUsers.keys() {
+                if connectionUsers[connId] == removedMember {
+                    websocket:Caller? memberCaller = connections[connId];
+                    if memberCaller is websocket:Caller {
+                        json removalMessage = {
+                            "_type": "removed_from_room",
+                            "roomId": roomId,
+                            "removedBy": userId,
+                            "roomName": chatRoom.roomName,
+                            "timestamp": time:utcToString(time:utcNow())
+                        };
+                        
+                        do {
+                            check memberCaller->writeMessage(removalMessage);
+                        } on fail error e {
+                            log:printError("Failed to notify removed member", e);
+                        }
+                        
+                        // Remove the room from the user's active rooms
+                        string[]? memberRoomIds = userRooms[connId];
+                        if memberRoomIds is string[] {
+                            string[] filteredRooms = [];
+                            
+                            foreach string roomIdInList in memberRoomIds {
+                                if roomIdInList != roomId {
+                                    filteredRooms.push(roomIdInList);
+                                }
+                            }
+                            
+                            userRooms[connId] = filteredRooms;
+                        }
+                    }
+                }
+            }
+        }
+        
+        return {
+            success: true,
+            message: string `Successfully removed ${removedMembers.length()} members from the room`,
+            data: {
+                "removedMembers": removedMembers
+            }
+        };
+    }
 }
 
 // Helper function to validate user from cookie
