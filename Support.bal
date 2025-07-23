@@ -58,6 +58,108 @@ public function convertToSriLankanTime(string utcTimeString) returns string {
     return formattedTime;
 }
 
+// Helper function to ensure all participant availability records have required fields
+public function ensureParticipantAvailabilityFieldsExist(string meetingId) returns error? {
+    log:printInfo(string `Ensuring all participant availability records have required fields for meeting ${meetingId}`);
+
+    map<json> filter = {
+        "meetingId": meetingId
+    };
+
+    stream<record {}, error?> cursor = check mongodb:participantAvailabilityCollection->find(filter);
+    int updatedCount = 0;
+    
+    error? cursorError = cursor.forEach(function(record {} availData) {
+        do {
+            json availJson = availData.toJson();
+            map<json> availMap = <map<json>>availJson;
+            
+            // Check if submittedAt field is missing
+            if (!availMap.hasKey("submittedAt")) {
+                string currentTime = time:utcToString(time:utcNow());
+                
+                // Update the record to add the missing field
+                map<json> updateFilter = {
+                    "_id": check availData["_id"].ensureType(json) // Use the MongoDB ObjectId for precise update
+                };
+                
+                mongodb:Update updateOperation = {
+                    "set": {
+                        "submittedAt": currentTime
+                    }
+                };
+                
+                do {
+                    _ = check mongodb:participantAvailabilityCollection->updateOne(updateFilter, updateOperation);
+                    updatedCount = updatedCount + 1;
+                    log:printInfo(string `Added missing submittedAt field to participant availability record for meeting ${meetingId}`);
+                } on fail error updateError {
+                    log:printError(string `Failed to update participant availability record: ${updateError.message()}`);
+                }
+            }
+        } on fail error e {
+            log:printError(string `Error processing participant availability record during field migration: ${e.message()}`);
+        }
+    });
+    
+    if (cursorError is error) {
+        log:printError(string `Error processing cursor during field migration: ${cursorError.message()}`);
+    }
+    
+    log:printInfo(string `Completed ensuring participant availability fields exist for meeting ${meetingId}. Updated ${updatedCount} records.`);
+    return;
+}
+
+// Global migration function to fix all participant availability records in the database
+public function migrateAllParticipantAvailabilityRecords() returns error? {
+    log:printInfo("Starting global migration of all participant availability records...");
+
+    stream<record {}, error?> cursor = check mongodb:participantAvailabilityCollection->find({});
+    int totalProcessed = 0;
+    int totalUpdated = 0;
+    
+    error? cursorError = cursor.forEach(function(record {} availData) {
+        do {
+            totalProcessed = totalProcessed + 1;
+            json availJson = availData.toJson();
+            map<json> availMap = <map<json>>availJson;
+            
+            // Check if submittedAt field is missing
+            if (!availMap.hasKey("submittedAt")) {
+                string currentTime = time:utcToString(time:utcNow());
+                
+                // Update the record to add the missing field
+                map<json> updateFilter = {
+                    "_id": check availData["_id"].ensureType(json)
+                };
+                
+                mongodb:Update updateOperation = {
+                    "set": {
+                        "submittedAt": currentTime
+                    }
+                };
+                
+                do {
+                    _ = check mongodb:participantAvailabilityCollection->updateOne(updateFilter, updateOperation);
+                    totalUpdated = totalUpdated + 1;
+                    log:printInfo(string `Global migration: Added missing submittedAt field to record ${totalProcessed}`);
+                } on fail error updateError {
+                    log:printError(string `Global migration: Failed to update record ${totalProcessed}: ${updateError.message()}`);
+                }
+            }
+        } on fail error e {
+            log:printError(string `Global migration: Error processing record ${totalProcessed}: ${e.message()}`);
+        }
+    });
+    
+    if (cursorError is error) {
+        log:printError(string `Global migration: Error processing cursor: ${cursorError.message()}`);
+    }
+    
+    log:printInfo(string `Global migration completed. Processed ${totalProcessed} records, updated ${totalUpdated} records.`);
+    return;
+}
+
 public function checkAndNotifyParticipantsForRoundRobin(Meeting meeting) returns error? {
     if (meeting.meetingType != "round_robin" || meeting?.hosts is () || meeting?.participants is ()) {
         return;
@@ -227,6 +329,14 @@ public function checkParticipantAvailabilityAndFindBestSlot(Meeting meeting) ret
 
     log:printInfo(string `Checking participant availability threshold for meeting ${meeting.id}`);
 
+    // First, ensure all existing participant availability records have submittedAt field
+    do {
+        _ = check ensureParticipantAvailabilityFieldsExist(meeting.id);
+    } on fail error e {
+        log:printError(string `Failed to ensure participant availability fields exist: ${e.message()}`);
+        // Continue execution even if this fails
+    }
+
     // Count total participants
     int totalParticipants = 0;
     if (meeting?.participants is MeetingParticipant[]) {
@@ -238,6 +348,39 @@ public function checkParticipantAvailabilityAndFindBestSlot(Meeting meeting) ret
         return;
     }
 
+    // Get external user mappings for this meeting
+    map<json> externalMappingFilter = {
+        "meetingId": meeting.id
+    };
+
+    stream<record {}, error?> mappingCursor = check mongodb:externalUserMappingCollection->find(externalMappingFilter);
+    map<string> emailToExternalId = {};
+
+    check from record {} mappingData in mappingCursor
+        do {
+            json mappingJson = mappingData.toJson();
+            json|error emailResult = mappingJson.email;
+            json|error externalUserIdResult = mappingJson.externalUserId;
+            
+            if (emailResult is json && externalUserIdResult is json) {
+                string email = emailResult.toString();
+                string externalUserId = externalUserIdResult.toString();
+                emailToExternalId[email] = externalUserId;
+            }
+        };
+
+    // Create list of valid usernames (actual participants + their external IDs)
+    string[] validUsernames = [];
+    if (meeting?.participants is MeetingParticipant[]) {
+        foreach MeetingParticipant participant in meeting?.participants ?: [] {
+            validUsernames.push(participant.username);
+            // Add external user ID if exists
+            if (emailToExternalId.hasKey(participant.username)) {
+                validUsernames.push(emailToExternalId[participant.username] ?: "");
+            }
+        }
+    }
+
     // Count participants who have submitted availability
     map<json> participantAvailFilter = {
         "meetingId": meeting.id
@@ -246,21 +389,84 @@ public function checkParticipantAvailabilityAndFindBestSlot(Meeting meeting) ret
     stream<record {}, error?> participantAvailCursor = check mongodb:participantAvailabilityCollection->find(participantAvailFilter);
     string[] participantsWithAvailability = [];
 
-    check from record {} availData in participantAvailCursor
+    // Process cursor manually to handle individual record conversion errors
+    error? cursorError = participantAvailCursor.forEach(function(record {} availData) {
         do {
             json availJson = availData.toJson();
-            ParticipantAvailability avail = check availJson.cloneWithType(ParticipantAvailability);
-            participantsWithAvailability.push(avail.username);
-        };
+            
+            // Handle missing submittedAt field by adding it if not present
+            map<json> availMap = <map<json>>availJson;
+            if (!availMap.hasKey("submittedAt")) {
+                string currentTime = time:utcToString(time:utcNow());
+                availMap["submittedAt"] = currentTime;
+                log:printInfo(string `Added missing submittedAt field for participant availability in checkParticipantAvailabilityAndFindBestSlot`);
+                
+                // Also update the database record
+                do {
+                    map<json> updateFilter = {
+                        "_id": check availData["_id"].ensureType(json)
+                    };
+                    
+                    mongodb:Update updateOperation = {
+                        "set": {
+                            "submittedAt": currentTime
+                        }
+                    };
+                    
+                    _ = check mongodb:participantAvailabilityCollection->updateOne(updateFilter, updateOperation);
+                    log:printInfo(string `Updated database record with submittedAt field`);
+                } on fail error updateError {
+                    log:printError(string `Failed to update database record with submittedAt: ${updateError.message()}`);
+                }
+            }
+            
+            ParticipantAvailability|error availResult = availMap.cloneWithType(ParticipantAvailability);
+            if (availResult is error) {
+                log:printError(string `Failed to convert participant availability record: ${availResult.message()}`);
+                log:printError(string `Record data: ${availMap.toString()}`);
+                // Skip this record and continue with others
+                return;
+            }
+            
+            ParticipantAvailability avail = availResult;
+            
+            // Only count if this username is in our valid usernames list
+            boolean isValidParticipant = false;
+            foreach string validUsername in validUsernames {
+                if (avail.username == validUsername) {
+                    isValidParticipant = true;
+                    break;
+                }
+            }
+            
+            if (isValidParticipant) {
+                participantsWithAvailability.push(avail.username);
+            }
+        } on fail error e {
+            log:printError(string `Error processing participant availability record: ${e.message()}`);
+            // Continue with next record
+        }
+    });
+    
+    if (cursorError is error) {
+        log:printError(string `Error processing participant availability cursor: ${cursorError.message()}`);
+    }
 
     int participantsSubmitted = participantsWithAvailability.length();
     float participationPercentage = <float>participantsSubmitted / <float>totalParticipants * 100.0;
 
-    log:printInfo(string `Meeting ${meeting.id}: ${participantsSubmitted}/${totalParticipants} participants submitted (${participationPercentage}%)`);
+    log:printInfo(string `📊 THRESHOLD CHECK for Meeting ${meeting.id}:`);
+    log:printInfo(string `   - Total participants: ${totalParticipants}`);
+    log:printInfo(string `   - Participants submitted: ${participantsSubmitted}`);
+    log:printInfo(string `   - Participation percentage: ${participationPercentage}%`);
+    log:printInfo(string `   - Required threshold: 80%`);
+    log:printInfo(string `   - Threshold reached: ${participationPercentage >= 80.0 ? "✅ YES" : "❌ NO"}`);
+    log:printInfo(string `Valid usernames for meeting ${meeting.id}: [${string:'join(", ", ...validUsernames)}]`);
+    log:printInfo(string `Participants with availability: [${string:'join(", ", ...participantsWithAvailability)}]`);
 
     // Check if we've reached 80% threshold
     if (participationPercentage >= 80.0) {
-        log:printInfo(string `80% threshold reached for meeting ${meeting.id}, finding best time slot`);
+        log:printInfo(string `🎉 80% threshold reached for meeting ${meeting.id}, proceeding to find best time slot`);
 
         // Find the best time slot
         TimeSlot? bestSlot = check findBestTimeSlotForParticipants(meeting);
@@ -333,12 +539,20 @@ public function checkParticipantAvailabilityAndFindBestSlot(Meeting meeting) ret
             }
 
             // Send notification to creator (and hosts for round robin)
-            check sendBestTimeSlotNotification(meeting, bestSlot, participationPercentage);
+            log:printInfo(string `About to call sendBestTimeSlotNotification for meeting ${meeting.id}`);
+            do {
+                check sendBestTimeSlotNotification(meeting, bestSlot, participationPercentage);
+                log:printInfo(string `Successfully completed sendBestTimeSlotNotification for meeting ${meeting.id}`);
+            } on fail error e {
+                log:printError(string `ERROR in sendBestTimeSlotNotification for meeting ${meeting.id}: ${e.message()}`);
+                log:printError(string `Error details: ${e.toString()}`);
+                // Don't re-throw the error to continue execution
+            }
         } else {
             log:printInfo(string `No suitable best time slot found for meeting ${meeting.id}`);
         }
     } else {
-        log:printInfo(string `80% threshold not yet reached for meeting ${meeting.id} (current: ${participationPercentage}%)`);
+        log:printInfo(string `⏳ 80% threshold not yet reached for meeting ${meeting.id} (current: ${participationPercentage}%)`);
     }
 
     return;
@@ -356,17 +570,81 @@ public function findBestTimeSlotForParticipants(Meeting meeting) returns TimeSlo
     stream<record {}, error?> participantAvailCursor = check mongodb:participantAvailabilityCollection->find(participantAvailFilter);
     TimeSlot[] participantTimeSlots = [];
 
-    check from record {} availData in participantAvailCursor
+    // Process cursor manually to handle individual record conversion errors
+    error? cursorError = participantAvailCursor.forEach(function(record {} availData) {
         do {
             json availJson = availData.toJson();
-            ParticipantAvailability avail = check availJson.cloneWithType(ParticipantAvailability);
+            
+            // Handle missing submittedAt field by adding it if not present
+            map<json> availMap = <map<json>>availJson;
+            if (!availMap.hasKey("submittedAt")) {
+                string currentTime = time:utcToString(time:utcNow());
+                availMap["submittedAt"] = currentTime;
+                log:printInfo(string `Added missing submittedAt field for participant availability in findBestTimeSlotForParticipants`);
+                
+                // Also update the database record
+                do {
+                    map<json> updateFilter = {
+                        "_id": check availData["_id"].ensureType(json)
+                    };
+                    
+                    mongodb:Update updateOperation = {
+                        "set": {
+                            "submittedAt": currentTime
+                        }
+                    };
+                    
+                    _ = check mongodb:participantAvailabilityCollection->updateOne(updateFilter, updateOperation);
+                    log:printInfo(string `Updated database record with submittedAt field in findBestTimeSlotForParticipants`);
+                } on fail error updateError {
+                    log:printError(string `Failed to update database record with submittedAt in findBestTimeSlotForParticipants: ${updateError.message()}`);
+                }
+            }
+            
+            ParticipantAvailability|error availResult = availMap.cloneWithType(ParticipantAvailability);
+            if (availResult is error) {
+                log:printError(string `Failed to convert participant availability record in findBestTimeSlotForParticipants: ${availResult.message()}`);
+                log:printError(string `Record data: ${availMap.toString()}`);
+                // Skip this record and continue with others
+                return;
+            }
+            
+            ParticipantAvailability avail = availResult;
             foreach TimeSlot slot in avail.timeSlots {
                 participantTimeSlots.push(slot);
             }
-        };
+        } on fail error e {
+            log:printError(string `Error processing participant availability record in findBestTimeSlotForParticipants: ${e.message()}`);
+            // Continue with next record
+        }
+    });
+    
+    if (cursorError is error) {
+        log:printError(string `Error processing participant availability cursor in findBestTimeSlotForParticipants: ${cursorError.message()}`);
+    }
+
+    // Also get creator's availability from availabilityCollection
+    map<json> creatorAvailFilter = {
+        "meetingId": meeting.id,
+        "username": meeting.createdBy
+    };
+
+    record {}|() creatorAvailRecord = check mongodb:availabilityCollection->findOne(creatorAvailFilter);
+    
+    if (creatorAvailRecord is record {}) {
+        json creatorJson = creatorAvailRecord.toJson();
+        Availability creatorAvail = check creatorJson.cloneWithType(Availability);
+        log:printInfo(string `Found creator availability for meeting ${meeting.id}: ${creatorAvail.timeSlots.length()} time slots`);
+        
+        foreach TimeSlot slot in creatorAvail.timeSlots {
+            participantTimeSlots.push(slot);
+        }
+    } else {
+        log:printInfo(string `No creator availability found for meeting ${meeting.id} (creator: ${meeting.createdBy})`);
+    }
 
     if (participantTimeSlots.length() == 0) {
-        log:printInfo(string `No participant time slots found for meeting ${meeting.id}`);
+        log:printInfo(string `No participant or creator time slots found for meeting ${meeting.id}`);
         return ();
     }
 
@@ -406,64 +684,131 @@ public function findBestTimeSlotForParticipants(Meeting meeting) returns TimeSlo
 // Function to send notification about best time slot found
 public function sendBestTimeSlotNotification(Meeting meeting, TimeSlot bestSlot, float participationPercentage) returns error? {
     log:printInfo(string `Sending best time slot notification for meeting ${meeting.id}`);
+    log:printInfo(string `Meeting title: ${meeting.title}`);
+    log:printInfo(string `Meeting creator: ${meeting.createdBy}`);
+    log:printInfo(string `Best slot: ${bestSlot.startTime} to ${bestSlot.endTime}`);
+    log:printInfo(string `Participation percentage: ${participationPercentage}%`);
 
-    // Determine recipients (creator and hosts for round robin)
+    // Only notify the creator (not hosts)
     string[] recipients = [meeting.createdBy];
+    log:printInfo(string `Recipients for notification: [${string:'join(", ", ...recipients)}]`);
 
-    if (meeting.meetingType == "round_robin" && meeting?.hosts is MeetingParticipant[]) {
-        foreach MeetingParticipant host in meeting?.hosts ?: [] {
-            if (host.username != meeting.createdBy) {
-                recipients.push(host.username);
-            }
-        }
-    }
+    // Generate notification ID
+    string notificationId = uuid:createType1AsString();
+    log:printInfo(string `Generated notification ID: ${notificationId}`);
 
     // Create notification
     Notification notification = {
-        id: uuid:createType1AsString(),
+        id: notificationId,
         title: meeting.title + " - Best Time Slot Found",
-        message: string `Great news! With ${participationPercentage}% of participants having submitted their availability, we've identified the optimal time slot for "${meeting.title}": ${convertToSriLankanTime(bestSlot.startTime)} to ${convertToSriLankanTime(bestSlot.endTime)}. Please review and confirm this time slot.`,
+        message: string `Great news! With ${participationPercentage}% of participants having submitted their availability, we've identified the optimal time slot for "${meeting.title}". Please review and confirm this time slot.`,
         notificationType: "best_timeslot_found",
         meetingId: meeting.id,
         toWhom: recipients,
         createdAt: time:utcToString(time:utcNow())
     };
 
-    // Insert notification
-    _ = check mongodb:notificationCollection->insertOne(notification);
+    log:printInfo(string `Created notification object with ID: ${notification.id}`);
+    log:printInfo(string `Notification title: ${notification.title}`);
+    log:printInfo(string `Notification type: ${notification.notificationType}`);
+    log:printInfo(string `About to insert notification into database...`);
+
+    // Insert notification - This should always succeed regardless of email processing
+    do {
+        // Now insert the notification
+        log:printInfo(string `Inserting notification with data: ${notification.toJson().toString()}`);
+        _ = check mongodb:notificationCollection->insertOne(notification);
+        log:printInfo(string `✅ Successfully inserted best time slot notification for meeting ${meeting.id} with ID: ${notification.id}`);
+        
+        // Verify insertion by querying back
+        map<json> verifyFilter = {"id": notification.id};
+        record {}|() verifyQuery = check mongodb:notificationCollection->findOne(verifyFilter);
+        if (verifyQuery is record {}) {
+            log:printInfo(string `✅ Verified: Notification with ID ${notification.id} exists in database`);
+        } else {
+            log:printError(string `❌ Verification failed: Notification with ID ${notification.id} not found after insertion`);
+        }
+        
+    } on fail error e {
+        log:printError(string `❌ Failed to insert best time slot notification for meeting ${meeting.id}: ${e.message()}`);
+        log:printError(string `Full error: ${e.toString()}`);
+        return e;
+    }
 
     // Send email notifications to recipients with email notifications enabled
+    // Use error handling to prevent email failures from affecting notification insertion
     foreach string recipient in recipients {
-        map<json> settingsFilter = {
-            "username": recipient
-        };
+        do {
+            map<json> settingsFilter = {
+                "username": recipient
+            };
 
-        record {}|() settingsRecord = check mongodb:notificationSettingsCollection->findOne(settingsFilter);
+            record {}|() settingsRecord = check mongodb:notificationSettingsCollection->findOne(settingsFilter);
 
-        if (settingsRecord is record {}) {
-            json settingsJson = settingsRecord.toJson();
-            NotificationSettings settings = check settingsJson.cloneWithType(NotificationSettings);
+            if (settingsRecord is record {}) {
+                json settingsJson = settingsRecord.toJson();
+                NotificationSettings settings = check settingsJson.cloneWithType(NotificationSettings);
 
-            if (settings.email_notifications) {
-                map<string> recipientEmail = check collectParticipantEmails([recipient]);
-                
-                // Temporarily set the best time slot in meeting for email template
-                TimeSlot? originalTimeSlot = meeting?.directTimeSlot;
-                meeting.directTimeSlot = bestSlot;
-                
-                error? emailResult = sendEmailNotifications(notification, meeting, recipientEmail);
-                
-                // Restore original time slot
-                meeting.directTimeSlot = originalTimeSlot;
+                if (settings.email_notifications) {
+                    map<string> recipientEmail = check collectParticipantEmails([recipient]);
+                    
+                    // Temporarily set the best time slot in meeting for email template
+                    TimeSlot? originalTimeSlot = meeting?.directTimeSlot;
+                    meeting.directTimeSlot = bestSlot;
+                    
+                    error? emailResult = sendEmailNotifications(notification, meeting, recipientEmail);
+                    
+                    // Restore original time slot
+                    meeting.directTimeSlot = originalTimeSlot;
 
-                if (emailResult is error) {
-                    log:printError(string `Failed to send best time slot email to ${recipient}`, emailResult);
+                    if (emailResult is error) {
+                        log:printError(string `Failed to send best time slot email to ${recipient}`, emailResult);
+                    } else {
+                        log:printInfo(string `Successfully sent best time slot email to ${recipient}`);
+                    }
                 }
             }
+        } on fail error e {
+            log:printError(string `Error processing email notification for recipient ${recipient}: ${e.message()}`);
+            // Continue with next recipient instead of failing completely
         }
     }
 
     log:printInfo(string `Best time slot notification sent for meeting ${meeting.id} to ${recipients.length()} recipients`);
+    return;
+}
+
+// Test function to verify notification insertion works
+public function testNotificationInsertion(string meetingId) returns error? {
+    log:printInfo(string `Testing notification insertion for meeting ${meetingId}`);
+    
+    Notification testNotification = {
+        id: uuid:createType1AsString(),
+        title: "Test Notification",
+        message: "This is a test notification to verify database insertion works",
+        notificationType: "best_timeslot_found",
+        meetingId: meetingId,
+        toWhom: ["test_user"],
+        createdAt: time:utcToString(time:utcNow())
+    };
+
+    do {
+        _ = check mongodb:notificationCollection->insertOne(testNotification);
+        log:printInfo(string `✅ Test notification inserted successfully with ID: ${testNotification.id}`);
+        
+        // Verify insertion
+        map<json> verifyFilter = {"id": testNotification.id};
+        record {}|() verifyResult = check mongodb:notificationCollection->findOne(verifyFilter);
+        if (verifyResult is record {}) {
+            log:printInfo(string `✅ Test notification verified in database`);
+        } else {
+            log:printError(string `❌ Test notification not found after insertion`);
+        }
+    } on fail error e {
+        log:printError(string `❌ Test notification insertion failed: ${e.message()}`);
+        return e;
+    }
+    
     return;
 }
 
@@ -498,15 +843,13 @@ public function checkAndFinalizeTimeSlot(Meeting meeting) returns error? {
         return;
     }
 
-    // Get notification recipients (creator and hosts only)
-    string[] recipients = [meeting.createdBy];
+    // Get notification recipients (participants only, not creator and hosts)
+    string[] recipients = [];
 
-    // Add hosts for round robin meetings
-    if (meeting.meetingType == "round_robin" && meeting?.hosts is MeetingParticipant[]) {
-        foreach MeetingParticipant host in meeting?.hosts ?: [] {
-            if (host.username != meeting.createdBy) { // Avoid duplicates
-                recipients.push(host.username);
-            }
+    // Add all participants to recipients
+    if (meeting?.participants is MeetingParticipant[]) {
+        foreach MeetingParticipant participant in meeting?.participants ?: [] {
+            recipients.push(participant.username);
         }
     }
 
@@ -618,7 +961,14 @@ public function findBestTimeSlot(Meeting meeting) returns TimeSlot?|error {
     check from record {} availData in participantCursor
         do {
             json availJson = availData.toJson();
-            ParticipantAvailability avail = check availJson.cloneWithType(ParticipantAvailability);
+            map<json> availMap = <map<json>>availJson;
+            
+            // Add submittedAt if not present
+            if (!availMap.hasKey("submittedAt")) {
+                availMap["submittedAt"] = time:utcToString(time:utcNow());
+            }
+            
+            ParticipantAvailability avail = check availMap.cloneWithType(ParticipantAvailability);
             participantAvailabilities.push(avail);
         };
 

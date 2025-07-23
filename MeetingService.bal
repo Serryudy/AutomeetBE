@@ -2929,6 +2929,12 @@ service /api on ln {
         // Ensure the username in the payload matches the authenticated user
         payload.username = username;
 
+        // Ensure submittedAt is always set (add if missing)
+        if payload.submittedAt == "" {
+            payload.submittedAt = time:utcToString(time:utcNow());
+            log:printInfo(string `POST /participant/availability: Added submittedAt field for user ${username}`);
+        }
+
         // Generate an ID if not provided
         if (payload.id == "") {
             payload.id = uuid:createType1AsString();
@@ -3029,7 +3035,10 @@ service /api on ln {
             
             // Update existing availability in PARTICIPANT AVAILABILITY COLLECTION
             mongodb:Update updateOperation = {
-                "set": {"timeSlots": <json>payload.timeSlots}
+                "set": {
+                    "timeSlots": <json>payload.timeSlots,
+                    "submittedAt": payload.submittedAt
+                }
             };
             
             var updateResult = mongodb:participantAvailabilityCollection->updateOne(availFilter, updateOperation);
@@ -3047,9 +3056,9 @@ service /api on ln {
             }
         }
 
-        // After participant submits availability, check for 80% threshold and find best time slot
+        // After participant submits availability, check for threshold and find best time slot
         if (meeting.meetingType == "group" || meeting.meetingType == "round_robin") {
-            log:printInfo(string `POST /participant/availability: Checking for 80% threshold and best time slot for ${meeting.meetingType} meeting`);
+            log:printInfo(string `POST /participant/availability: Checking for threshold and best time slot for ${meeting.meetingType} meeting`);
             
             // Use do-on-fail for proper error handling
             do {
@@ -3218,7 +3227,7 @@ service /api on ln {
         };
     }
 
-    resource function post availability/externally(http:Request req) returns Availability|ErrorResponse|error {
+    resource function post availability/externally(http:Request req) returns ParticipantAvailability|ErrorResponse|error {
         // Parse the request payload
         json|http:ClientError jsonPayload = req.getJsonPayload();
         if jsonPayload is http:ClientError {
@@ -3235,21 +3244,28 @@ service /api on ln {
             "id": payload.meetingId
         };
 
-        record {}|() meeting = check mongodb:meetingCollection->findOne(meetingFilter);
-        if meeting is () {
+        record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
+        if meetingRecord is () {
             return {
                 message: "Meeting not found",
                 statusCode: 404
             };
         }
 
-        // Create new availability record
-        Availability availability = {
+        // Convert to Meeting type
+        json meetingJson = meetingRecord.toJson();
+        Meeting meeting = check meetingJson.cloneWithType(Meeting);
+
+        // Create new ParticipantAvailability record (not Availability)
+        ParticipantAvailability availability = {
             id: uuid:createType1AsString(),
             username: payload.userId, // Use the provided userId as username
             meetingId: payload.meetingId,
-            timeSlots: payload.timeSlots
+            timeSlots: payload.timeSlots,
+            submittedAt: time:utcToString(time:utcNow()) // Add the required submittedAt field
         };
+
+        log:printInfo(string `Created ParticipantAvailability record with submittedAt: ${availability.submittedAt}`);
 
         // Check if availability already exists
         map<json> availFilter = {
@@ -3262,6 +3278,33 @@ service /api on ln {
         if existingAvailability is () {
             // Insert new availability
             _ = check mongodb:participantAvailabilityCollection->insertOne(availability);
+            
+            log:printInfo(string `External availability submitted by ${payload.userId} for meeting ${payload.meetingId}`);
+            
+            // After external participant submits availability, check for threshold and find best time slot
+            if (meeting.meetingType == "group" || meeting.meetingType == "round_robin") {
+                log:printInfo(string `Checking for threshold and best time slot for ${meeting.meetingType} meeting after external submission`);
+                log:printInfo(string `Meeting ID: ${meeting.id}, Meeting Type: ${meeting.meetingType}`);
+                
+                // Use do-on-fail for proper error handling
+                do {
+                    _ = check checkParticipantAvailabilityAndFindBestSlot(meeting);
+                    log:printInfo(string `Successfully checked participant availability threshold for meeting ${meeting.id} after external submission`);
+                } on fail error e {
+                    log:printError(string `Error in checkParticipantAvailabilityAndFindBestSlot for external submission: ${e.message()}`);
+                    log:printError(string `Full error details: ${e.toString()}`);
+                }
+            } else {
+                log:printInfo(string `Skipping threshold check for meeting type: ${meeting.meetingType}`);
+            }
+
+            // For any meeting type, check if deadline has passed and find the best time slot
+            do {
+                _ = check checkAndFinalizeTimeSlot(meeting);
+                log:printInfo(string `Successfully checked and finalized time slot for meeting ${meeting.id} after external submission`);
+            } on fail error e {
+                log:printError(string `Error in checkAndFinalizeTimeSlot for external submission: ${e.message()}`);
+            }
         } else {
             return {
                 message: "Availability already exists for this user and meeting",
@@ -3272,7 +3315,7 @@ service /api on ln {
         return availability;
     }
 
-    resource function put availability/externally(http:Request req) returns Availability|ErrorResponse|error {
+    resource function put availability/externally(http:Request req) returns ParticipantAvailability|ErrorResponse|error {
         // Parse the request payload
         json|http:ClientError jsonPayload = req.getJsonPayload();
         if jsonPayload is http:ClientError {
@@ -3289,13 +3332,17 @@ service /api on ln {
             "id": payload.meetingId
         };
 
-        record {}|() meeting = check mongodb:meetingCollection->findOne(meetingFilter);
-        if meeting is () {
+        record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
+        if meetingRecord is () {
             return {
                 message: "Meeting not found",
                 statusCode: 404
             };
         }
+
+        // Convert to Meeting type
+        json meetingJson = meetingRecord.toJson();
+        Meeting meeting = check meetingJson.cloneWithType(Meeting);
 
         // Check if availability exists
         map<json> availFilter = {
@@ -3315,18 +3362,43 @@ service /api on ln {
         // Update the availability
         mongodb:Update updateOperation = {
             "set": {
-                "timeSlots": check payload.timeSlots.cloneWithType(json) // Convert TimeSlot[] to json
+                "timeSlots": check payload.timeSlots.cloneWithType(json), // Convert TimeSlot[] to json
+                "submittedAt": time:utcToString(time:utcNow()) // Update the submittedAt timestamp
             }
         };
 
         _ = check mongodb:participantAvailabilityCollection->updateOne(availFilter, updateOperation);
 
+        log:printInfo(string `External availability updated by ${payload.userId} for meeting ${payload.meetingId}`);
+
+        // After external participant updates availability, check for threshold and find best time slot
+        if (meeting.meetingType == "group" || meeting.meetingType == "round_robin") {
+            log:printInfo(string `Checking for threshold and best time slot for ${meeting.meetingType} meeting after external update`);
+            
+            // Use do-on-fail for proper error handling
+            do {
+                _ = check checkParticipantAvailabilityAndFindBestSlot(meeting);
+                log:printInfo(string `Successfully checked participant availability threshold for meeting ${meeting.id} after external update`);
+            } on fail error e {
+                log:printError(string `Error in checkParticipantAvailabilityAndFindBestSlot for external update: ${e.message()}`);
+            }
+        }
+
+        // For any meeting type, check if deadline has passed and find the best time slot
+        do {
+            _ = check checkAndFinalizeTimeSlot(meeting);
+            log:printInfo(string `Successfully checked and finalized time slot for meeting ${meeting.id} after external update`);
+        } on fail error e {
+            log:printError(string `Error in checkAndFinalizeTimeSlot for external update: ${e.message()}`);
+        }
+
         // Return the updated availability
-        Availability updatedAvailability = {
+        ParticipantAvailability updatedAvailability = {
             id: (existingAvailability["id"]).toString(),
             username: payload.userId,
             meetingId: payload.meetingId,
-            timeSlots: payload.timeSlots
+            timeSlots: payload.timeSlots,
+            submittedAt: time:utcToString(time:utcNow())
         };
 
         return updatedAvailability;
@@ -3416,6 +3488,177 @@ service /api on ln {
         }
 
         return externalMeeting;
+    }
+
+    // External endpoint to get host/creator availability for a meeting
+    resource function get hosts/availability/externally/[string meetingId]() returns json|ErrorResponse|error {
+        // Check if the meeting exists
+        map<json> meetingFilter = {
+            "id": meetingId
+        };
+
+        record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
+        if meetingRecord is () {
+            return <ErrorResponse>{
+                message: "Meeting not found",
+                statusCode: 404
+            };
+        }
+
+        // Convert to Meeting type
+        json meetingJson = meetingRecord.toJson();
+        Meeting meeting = check meetingJson.cloneWithType(Meeting);
+
+        // Collect all host and creator usernames
+        string[] hostUsernames = [];
+        
+        // Add creator
+        hostUsernames.push(meeting.createdBy);
+        
+        // Add hosts for round_robin meetings
+        if meeting.meetingType == "round_robin" && meeting?.hosts is MeetingParticipant[] {
+            foreach MeetingParticipant host in meeting?.hosts ?: [] {
+                // Avoid duplicates if creator is also a host
+                boolean alreadyExists = false;
+                foreach string existingUser in hostUsernames {
+                    if existingUser == host.username {
+                        alreadyExists = true;
+                        break;
+                    }
+                }
+                if !alreadyExists {
+                    hostUsernames.push(host.username);
+                }
+            }
+        }
+
+        // Get availability for all hosts/creators from both collections
+        json[] allAvailabilities = [];
+        
+        foreach string hostUsername in hostUsernames {
+            // Check participant availability collection first
+            map<json> participantFilter = {
+                "username": hostUsername,
+                "meetingId": meetingId
+            };
+            
+            record {}|() participantAvail = check mongodb:participantAvailabilityCollection->findOne(participantFilter);
+            
+            if participantAvail is record {} {
+                json participantJson = participantAvail.toJson();
+                map<json> participantMap = <map<json>>participantJson;
+                
+                // Add submittedAt if not present
+                if !participantMap.hasKey("submittedAt") {
+                    participantMap["submittedAt"] = time:utcToString(time:utcNow());
+                }
+                
+                // Add role information
+                if hostUsername == meeting.createdBy {
+                    participantMap["role"] = "creator";
+                } else {
+                    participantMap["role"] = "host";
+                }
+                
+                allAvailabilities.push(participantMap);
+            } else {
+                // Check regular availability collection
+                map<json> availFilter = {
+                    "username": hostUsername,
+                    "meetingId": meetingId
+                };
+                
+                record {}|() regularAvail = check mongodb:availabilityCollection->findOne(availFilter);
+                
+                if regularAvail is record {} {
+                    json regularJson = regularAvail.toJson();
+                    map<json> regularMap = <map<json>>regularJson;
+                    
+                    // Add submittedAt if not present (for consistency)
+                    if !regularMap.hasKey("submittedAt") {
+                        regularMap["submittedAt"] = time:utcToString(time:utcNow());
+                    }
+                    
+                    // Add role information
+                    if hostUsername == meeting.createdBy {
+                        regularMap["role"] = "creator";
+                    } else {
+                        regularMap["role"] = "host";
+                    }
+                    
+                    allAvailabilities.push(regularMap);
+                }
+            }
+        }
+
+        // Return structured response as json
+        json response = {
+            "meetingId": meetingId,
+            "meetingTitle": meeting.title,
+            "meetingType": meeting.meetingType,
+            "creator": meeting.createdBy,
+            "hosts": check (meeting?.hosts ?: []).cloneWithType(json),
+            "hostAvailabilities": allAvailabilities,
+            "totalHostsFound": hostUsernames.length(),
+            "availabilitiesFound": allAvailabilities.length()
+        };
+        
+        return response;
+    }
+
+    // Migration endpoint to fix all participant availability records (admin only)
+    resource function post admin/migrate/'participant\-availability(http:Request req) returns json|ErrorResponse|error {
+        // Extract username from cookie
+        string? username = check validateAndGetUsernameFromCookie(req);
+        if username is () {
+            return <ErrorResponse>{
+                message: "Unauthorized: Invalid or missing authentication token",
+                statusCode: 401
+            };
+        }
+
+        // Check if user is admin (optional - you can remove this check if needed)
+        map<json> userFilter = {
+            "username": username
+        };
+
+        record {}|() userRecord = check mongodb:userCollection->findOne(userFilter);
+        if userRecord is () {
+            return <ErrorResponse>{
+                message: "User not found",
+                statusCode: 404
+            };
+        }
+
+        json userJson = userRecord.toJson();
+        User user = check userJson.cloneWithType(User);
+
+        if (!user.isadmin) {
+            return <ErrorResponse>{
+                message: "Unauthorized: Admin access required",
+                statusCode: 403
+            };
+        }
+
+        // Run the migration
+        log:printInfo(string `Admin ${username} initiated global participant availability migration`);
+        
+        do {
+            _ = check migrateAllParticipantAvailabilityRecords();
+            log:printInfo(string `Global participant availability migration completed successfully`);
+            
+            return <json>{
+                "status": "success",
+                "message": "Global participant availability migration completed successfully",
+                "initiatedBy": username
+            };
+        } on fail error e {
+            log:printError(string `Global participant availability migration failed: ${e.message()}`);
+            return <ErrorResponse>{
+                message: string `Migration failed: ${e.message()}`,
+                statusCode: 500
+            };
+        }
     }
   
 }

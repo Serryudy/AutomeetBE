@@ -635,7 +635,14 @@ service /api/analytics on ln {
                 check from record {} partAvailData in partAvailCursor
                     do {
                         json partAvailJson = partAvailData.toJson();
-                        ParticipantAvailability partAvail = check partAvailJson.cloneWithType(ParticipantAvailability);
+                        map<json> partAvailMap = <map<json>>partAvailJson;
+
+                        // Add submittedAt if not present
+                        if !partAvailMap.hasKey("submittedAt") {
+                            partAvailMap["submittedAt"] = time:utcToString(time:utcNow());
+                        }
+
+                        ParticipantAvailability partAvail = check partAvailMap.cloneWithType(ParticipantAvailability);
                         allSlots = [...allSlots, ...partAvail.timeSlots];
                     };
 
