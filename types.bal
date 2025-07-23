@@ -105,6 +105,7 @@ public type Meeting record {
     boolean deadlineNotificationSent = false;
     string? canceledBy?;
     string? canceledAt?;
+    string? google_calendar_event_id?;
 };
 
 public type MeetingContent record {

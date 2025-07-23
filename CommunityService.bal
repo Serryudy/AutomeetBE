@@ -355,4 +355,155 @@ resource function put contacts/[string contactId](http:Request req) returns Cont
 
     return payload;
 }
+
+resource function put groups/[string groupId](http:Request req) returns Group|ErrorResponse|error {
+    // Extract username from cookie for authorization
+    string? username = check validateAndGetUsernameFromCookie(req);
+    if username is () {
+        return {
+            message: "Unauthorized: Invalid or missing authentication token",
+            statusCode: 401
+        };
+    }
+
+    // Parse the request payload
+    json|http:ClientError jsonPayload = req.getJsonPayload();
+    if jsonPayload is http:ClientError {
+        return {
+            message: "Invalid request payload: " + jsonPayload.message(),
+            statusCode: 400
+        };
+    }
+
+    // Create filter to find the existing group
+    map<json> filter = {
+        "id": groupId,
+        "createdBy": username
+    };
+
+    // Check if group exists and belongs to user
+    record {}|() existingGroup = check mongodb:groupCollection->findOne(filter);
+    if existingGroup is () {
+        return {
+            message: "Group not found or unauthorized to edit",
+            statusCode: 404
+        };
+    }
+
+    // Convert payload to map<json> and add required fields
+    map<json> updateData = <map<json>>jsonPayload;
+    updateData["id"] = groupId;
+    updateData["createdBy"] = username;
+
+    // Convert to Group type
+    Group payload = check updateData.cloneWithType(Group);
+
+    // Validate that all contact IDs belong to the authenticated user
+    boolean areContactsValid = check validateContactIds(username, payload.contactIds);
+    if (!areContactsValid) {
+        return {
+            message: "Invalid contact ID: One or more contacts do not belong to the user",
+            statusCode: 400
+        };
+    }
+
+    // Additional validation: Verify that the contacts exist and match the username
+    foreach string contactId in payload.contactIds {
+        // Create a filter to find the contact
+        map<json> contactFilter = {
+            "id": contactId,
+            "createdBy": username
+        };
+        
+        record {}|() contact = check mongodb:contactCollection->findOne(contactFilter);
+        
+        // If contact not found, return an error
+        if contact is () {
+            return {
+                message: "Invalid contact ID: Contact '" + contactId + "' not found in user's contacts",
+                statusCode: 400
+            };
+        }
+        
+        // Extract the contact's username to verify it exists
+        json contactJson = (<record {}>contact).toJson();
+        string? contactUsername = check contactJson.username.ensureType();
+        
+        if contactUsername is () || contactUsername == "" {
+            return {
+                message: "Invalid contact: Contact '" + contactId + "' has no associated username",
+                statusCode: 400
+            };
+        }
+    }
+
+    // Update the group in MongoDB
+    mongodb:Update updateDoc = {
+        "set": {
+            "name": payload.name,
+            "contactIds": payload.contactIds,
+            "id": groupId,
+            "createdBy": username
+        }
+    };
+
+    _ = check mongodb:groupCollection->updateOne(filter, updateDoc);
+
+    return payload;
+}
+
+resource function delete groups/[string groupId](http:Request req) returns http:Response|error {
+    // Extract username from cookie for authorization
+    string? username = check validateAndGetUsernameFromCookie(req);
+    if username is () {
+        http:Response response = new;
+        response.statusCode = 401;
+        response.setJsonPayload({
+            "message": "Unauthorized - Please login again",
+            "statusCode": 401
+        });
+        return response;
+    }
+
+    // Create filter for finding and deleting the group
+    map<json> filter = {
+        "id": groupId,
+        "createdBy": username
+    };
+
+    // Try to find the group first
+    record {}|() existingGroup = check mongodb:groupCollection->findOne(filter);
+    if existingGroup is () {
+        http:Response response = new;
+        response.statusCode = 404;
+        response.setJsonPayload({
+            "message": "Group not found",
+            "statusCode": 404
+        });
+        return response;
+    }
+
+    // Delete the group
+    var deleteResult = check mongodb:groupCollection->deleteOne(filter);
+
+    // Check if deletion was successful
+    if deleteResult.deletedCount == 0 {
+        http:Response response = new;
+        response.statusCode = 500;
+        response.setJsonPayload({
+            "message": "Failed to delete group",
+            "statusCode": 500
+        });
+        return response;
+    }
+
+    // Return success response
+    http:Response response = new;
+    response.statusCode = 200;
+    response.setJsonPayload({
+        "message": "Group deleted successfully",
+        "statusCode": 200
+    });
+    return response;
+}
 }
