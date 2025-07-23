@@ -1644,6 +1644,29 @@ service /api on ln {
             return enhancedResponse;
         }
 
+        // If no best time slot found in collection, check if the meeting is confirmed and has a directTimeSlot
+        if (meetingData.status == "confirmed" && meetingData?.directTimeSlot is TimeSlot) {
+            TimeSlot confirmedTimeSlot = <TimeSlot>meetingData?.directTimeSlot;
+            
+            log:printInfo(string `📅 PARTICIPANT AVAILABILITY: Meeting ${meetingId} is confirmed, returning directTimeSlot as bestTimeSlot`);
+            log:printInfo(string `   - Confirmed time slot: ${confirmedTimeSlot.startTime} to ${confirmedTimeSlot.endTime}`);
+
+            // Create enhanced response with confirmed time slot presented as best time slot
+            json availabilitiesJson = check availabilities.toJson().cloneWithType(json);
+            json confirmedTimeSlotJson = check confirmedTimeSlot.toJson().cloneWithType(json);
+
+            map<json> responseJson = {
+                "availabilities": availabilitiesJson,
+                "bestTimeSlot": confirmedTimeSlotJson,
+                "hasBestTimeSlot": true,
+                "isConfirmed": true
+            };
+
+            http:Response enhancedResponse = new;
+            enhancedResponse.setJsonPayload(responseJson);
+            return enhancedResponse;
+        }
+
         // If no best time slot found, return regular availabilities array
         return availabilities;
     }
@@ -1954,6 +1977,9 @@ service /api on ln {
             // Use the provided time slot
             json timeSlotJson = payload["timeSlot"];
             timeSlot = check timeSlotJson.cloneWithType(TimeSlot);
+            log:printInfo(string `📅 CONFIRMATION: Using provided time slot for meeting ${meetingId}`);
+            log:printInfo(string `   - Start Time: ${timeSlot.startTime}`);
+            log:printInfo(string `   - End Time: ${timeSlot.endTime}`);
         }
 
         // Update meeting with confirmed time slot
@@ -1964,10 +1990,35 @@ service /api on ln {
             }
         };
 
+        log:printInfo(string `📅 CONFIRMATION: Updating meeting ${meetingId} with confirmed time slot`);
+        log:printInfo(string `   - directTimeSlot: ${timeSlot.toJson().toString()}`);
+        log:printInfo(string `   - status: confirmed`);
+
         _ = check mongodb:meetingCollection->updateOne(
             {"id": meetingId},
             updateDoc
         );
+
+        log:printInfo(string `✅ CONFIRMATION: Successfully updated meeting ${meetingId} with confirmed time slot`);
+
+        // Verify the update by fetching the meeting again
+        record {}|() verifyMeeting = check mongodb:meetingCollection->findOne({"id": meetingId});
+        if (verifyMeeting is record {}) {
+            json verifyJson = verifyMeeting.toJson();
+            json|error directTimeSlotCheck = verifyJson.directTimeSlot;
+            if (directTimeSlotCheck is json && directTimeSlotCheck != ()) {
+                log:printInfo(string `✅ VERIFICATION: Meeting ${meetingId} directTimeSlot confirmed as: ${directTimeSlotCheck.toString()}`);
+            } else {
+                log:printError(string `❌ VERIFICATION: Meeting ${meetingId} directTimeSlot is null or missing after update!`);
+            }
+            
+            json|error statusCheck = verifyJson.status;
+            if (statusCheck is json) {
+                log:printInfo(string `✅ VERIFICATION: Meeting ${meetingId} status is: ${statusCheck.toString()}`);
+            }
+        } else {
+            log:printError(string `❌ VERIFICATION: Could not retrieve meeting ${meetingId} for verification`);
+        }
 
         // Notify all participants about the confirmed time
         string[] recipients = [];
@@ -2192,6 +2243,19 @@ service /api on ln {
         json jsonData = rawMeeting.toJson();
         Meeting meeting = check jsonData.cloneWithType(Meeting);
 
+        log:printInfo(string `📋 MEETING DETAILS: Retrieved meeting ${meetingId} for user ${username}`);
+        log:printInfo(string `   - Meeting title: ${meeting.title}`);
+        log:printInfo(string `   - Meeting status: ${meeting.status}`);
+        if (meeting?.directTimeSlot is TimeSlot) {
+            TimeSlot directSlot = <TimeSlot>meeting?.directTimeSlot;
+            log:printInfo(string `   - directTimeSlot found: ${directSlot.startTime} to ${directSlot.endTime}`);
+            if (meeting.status == "confirmed") {
+                log:printInfo(string `   - ✅ Meeting is CONFIRMED with this time slot`);
+            }
+        } else {
+            log:printInfo(string `   - directTimeSlot: null or not set`);
+        }
+
         // Determine the user's role in this meeting
         if (meeting.createdBy == username) {
             // User created this meeting
@@ -2249,7 +2313,12 @@ service /api on ln {
             json availJson = userAvailData.toJson();
             Availability userAvail = check availJson.cloneWithType(Availability);
             meeting["userAvailability"] = userAvail;
+            log:printInfo(string `📋 MEETING DETAILS: Added userAvailability for user ${username} with ${userAvail.timeSlots.length()} time slots`);
+        } else {
+            log:printInfo(string `📋 MEETING DETAILS: No userAvailability found for user ${username}`);
         }
+
+        log:printInfo(string `📋 MEETING DETAILS: Returning meeting data for ${meetingId} with status: ${meeting.status}`);
 
         return meeting;
     }
