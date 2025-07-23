@@ -4,7 +4,7 @@ import mongodb_atlas_app.mongodb;
 
 @http:ServiceConfig {
     cors: {
-        allowOrigins: ["http://localhost:3000"],
+        allowOrigins: ["http://localhost:3000", "https://automeet-fe.vercel.app"],
         allowCredentials: true,
         allowHeaders: ["content-type", "authorization"],
         allowMethods: ["POST", "GET", "OPTIONS", "PUT", "DELETE"],

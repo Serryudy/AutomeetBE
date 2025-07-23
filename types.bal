@@ -377,3 +377,13 @@ public type BestTimeSlot record {
     string foundAt;
     string[] notifiedUsers;
 };
+
+public type CreatorHostsAvailability record {
+    string meetingId;
+    string meetingTitle;
+    MeetingType meetingType;
+    string creator;
+    MeetingParticipant[] hosts;
+    ParticipantAvailability[] availabilities;
+    BestTimeSlot? bestTimeSlot;
+};

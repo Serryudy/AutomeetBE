@@ -3,7 +3,6 @@ import ballerina/log;
 import ballerina/jwt;
 import ballerina/url;
 import ballerina/uuid;
-import ballerina/time;
 import mongodb_atlas_app.mongodb;
 
 // Configuration variables
@@ -231,15 +230,7 @@ resource function post login(http:Caller caller, http:Request req) returns error
     // Generate JWT token 
     string token = check generateJwtToken(user);
     
-    // Get current time and device info
-    time:Utc utcNow = time:utcNow();
-    string currentTime = time:utcToString(utcNow);
-    string|http:HeaderNotFoundError userAgentResult = req.getHeader("User-Agent");
-    string userAgent = userAgentResult is string ? userAgentResult : "Chrome Extension";
-    
-    // Send login welcome email asynchronously (non-blocking)
-    // sendLoginWelcomeEmailAsync(user.username, user.name, currentTime, userAgent);
-    // sendLoginWelcomeEmailAsync(user.username, user.name, currentTime, userAgent);
+   
     
     // Create login response - no token in the response body
     LoginResponse loginResponse = {
