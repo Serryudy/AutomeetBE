@@ -407,19 +407,6 @@ public function findBestTimeSlotForParticipants(Meeting meeting) returns TimeSlo
 public function sendBestTimeSlotNotification(Meeting meeting, TimeSlot bestSlot, float participationPercentage) returns error? {
     log:printInfo(string `Sending best time slot notification for meeting ${meeting.id}`);
 
-    // Check if best time slot notification already exists to prevent duplicates
-    map<json> existingBestTimeSlotFilter = {
-        "meetingId": meeting.id,
-        "notificationType": "best_timeslot_found"
-    };
-
-    record {}|() existingBestTimeSlot = check mongodb:notificationCollection->findOne(existingBestTimeSlotFilter);
-    
-    if existingBestTimeSlot is record {} {
-        log:printInfo(string `Best time slot notification already exists for meeting ${meeting.id}, skipping duplicate`);
-        return;
-    }
-
     // Determine recipients (creator and hosts for round robin)
     string[] recipients = [meeting.createdBy];
 
@@ -2212,23 +2199,8 @@ public function createMeetingNotificationWithMixedParticipants(
         string meetingTitle,
         MeetingType meetingType,
         MeetingParticipant[] participants,
-        string creatorUsername,
         MeetingParticipant[]? hosts = ()
 ) returns Notification|error {
-
-    // Check if a notification for this meeting has already been sent to prevent duplicates
-    map<json> existingNotificationFilter = {
-        "meetingId": meetingId,
-        "notificationType": "creation"
-    };
-
-    record {}|() existingNotification = check mongodb:notificationCollection->findOne(existingNotificationFilter);
-    
-    if existingNotification is record {} {
-        // Notification already exists, return it without creating a new one
-        json notificationJson = existingNotification.toJson();
-        return check notificationJson.cloneWithType(Notification);
-    }
 
     // Separate registered and unregistered participants
     string[] registeredParticipants = [];
@@ -2310,16 +2282,29 @@ public function createMeetingNotificationWithMixedParticipants(
         log:printInfo(string `Found ${unregisteredParticipants.length()} unregistered participants for meeting: ${meetingTitle}`);
     }
 
-    // Return a notification representing the overall process
-    return {
-        id: uuid:createType1AsString(),
-        title: meetingTitle,
-        message: string `Meeting notifications sent.`,
-        notificationType: "creation",
-        meetingId: meetingId,
-        toWhom: [creatorUsername], // Only send to meeting creator
-        createdAt: time:utcToString(time:utcNow())
-    };
+    // Return the participant notification if one was created, otherwise return a simple notification
+    if registeredParticipants.length() > 0 {
+        return {
+            id: uuid:createType1AsString(),
+            title: meetingTitle,
+            message: "Meeting notification sent to registered participants",
+            notificationType: "creation",
+            meetingId: meetingId,
+            toWhom: registeredParticipants,
+            createdAt: time:utcToString(time:utcNow())
+        };
+    } else {
+        // Return minimal notification if no registered participants
+        return {
+            id: uuid:createType1AsString(),
+            title: meetingTitle,
+            message: "Meeting created",
+            notificationType: "creation",
+            meetingId: meetingId,
+            toWhom: [],
+            createdAt: time:utcToString(time:utcNow())
+        };
+    }
 }
 
 public function sendWelcomeEmail(string userEmail, string userName) returns error? {
@@ -2351,7 +2336,7 @@ public function sendWelcomeEmail(string userEmail, string userName) returns erro
         subject: "Welcome to AUTOMEET! 🎉",
         body: string `Dear ${userName},
 
-Welcome to AUTOMEET! 🚀
+Welcome to AUTOMEET!
 
 Thank you for joining our platform - THE easiest way to schedule anything collaboratively.
 

@@ -98,11 +98,11 @@ service /api on ln {
             meetingId,
             meeting.title,
             "direct",
-            participants,
-            username
+            participants
         );
 
-        // Creator is already included in the notification
+        // Add the creator to the notification recipients
+        notification.toWhom.push(username);
 
         // Insert the notification
         _ = check mongodb:notificationCollection->insertOne(notification);
@@ -190,11 +190,11 @@ service /api on ln {
             meetingId,
             meeting.title,
             "group",
-            participants,
-            username
+            participants
         );
 
-        // Creator is already included in the notification
+        // Add the creator to the notification recipients
+        notification.toWhom.push(username);
 
         // Insert the notification
         _ = check mongodb:notificationCollection->insertOne(notification);
@@ -302,11 +302,11 @@ service /api on ln {
             meeting.title,
             "round_robin",
             participants,
-            username,
             hosts
         );
 
-        // Creator is already included in the notification
+        // Add the creator to the notification recipients
+        notification.toWhom.push(username);
 
         // Insert the notification
         _ = check mongodb:notificationCollection->insertOne(notification);
@@ -684,6 +684,9 @@ service /api on ln {
             "notificationId": notificationId
         };
     }
+
+
+
     
 
     // Updated endpoint to submit availability with cookie authentication
@@ -1269,7 +1272,14 @@ service /api on ln {
         check from record {} availData in availCursor
             do {
                 json availJson = availData.toJson();
-                ParticipantAvailability avail = check availJson.cloneWithType(ParticipantAvailability);
+                map<json> availJsonMap = <map<json>>availJson;
+
+                // Add submittedAt if not present
+                if !availJsonMap.hasKey("submittedAt") {
+                    availJsonMap["submittedAt"] = time:utcToString(time:utcNow());
+                }
+
+                ParticipantAvailability avail = check availJsonMap.cloneWithType(ParticipantAvailability);
                 availabilities.push(avail);
             };
 
@@ -1597,7 +1607,14 @@ service /api on ln {
         check from record {} availData in availCursor
             do {
                 json availJson = availData.toJson();
-                ParticipantAvailability avail = check availJson.cloneWithType(ParticipantAvailability);
+                map<json> availJsonMap = <map<json>>availJson;
+
+                // Add submittedAt if not present
+                if !availJsonMap.hasKey("submittedAt") {
+                    availJsonMap["submittedAt"] = time:utcToString(time:utcNow());
+                }
+
+                ParticipantAvailability avail = check availJsonMap.cloneWithType(ParticipantAvailability);
                 availabilities.push(avail);
             };
 
@@ -1954,26 +1971,6 @@ service /api on ln {
 
         // Notify all participants about the confirmed time
         string[] recipients = [];
-
-        // Check if confirmation notification already exists to prevent duplicates
-        map<json> existingConfirmationFilter = {
-            "meetingId": meetingId,
-            "notificationType": "confirmation"
-        };
-
-        record {}|() existingConfirmation = check mongodb:notificationCollection->findOne(existingConfirmationFilter);
-        
-        if existingConfirmation is record {} {
-            // Confirmation notification already sent
-            http:Response response = new;
-            response.statusCode = 200;
-            response.setJsonPayload({
-                "status": "success",
-                "message": "Meeting already confirmed, no duplicate notification sent",
-                "meetingId": meetingId
-            });
-            return response;
-        }
 
         // Add creator
         recipients.push(meeting.createdBy);
@@ -3238,8 +3235,8 @@ service /api on ln {
             "id": payload.meetingId
         };
 
-        record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
-        if meetingRecord is () {
+        record {}|() meeting = check mongodb:meetingCollection->findOne(meetingFilter);
+        if meeting is () {
             return {
                 message: "Meeting not found",
                 statusCode: 404
@@ -3265,15 +3262,6 @@ service /api on ln {
         if existingAvailability is () {
             // Insert new availability
             _ = check mongodb:participantAvailabilityCollection->insertOne(availability);
-            
-            // After inserting availability, check for 80% threshold and best time slots
-            do {
-                Meeting meeting = check meetingRecord.cloneWithType(Meeting);
-                _ = check checkParticipantAvailabilityAndFindBestSlot(meeting);
-                _ = check checkAndFinalizeTimeSlot(meeting);
-            } on fail var e {
-                log:printError("External availability threshold check failed", 'error = e);
-            }
         } else {
             return {
                 message: "Availability already exists for this user and meeting",
@@ -3301,8 +3289,8 @@ service /api on ln {
             "id": payload.meetingId
         };
 
-        record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
-        if meetingRecord is () {
+        record {}|() meeting = check mongodb:meetingCollection->findOne(meetingFilter);
+        if meeting is () {
             return {
                 message: "Meeting not found",
                 statusCode: 404
@@ -3332,15 +3320,6 @@ service /api on ln {
         };
 
         _ = check mongodb:participantAvailabilityCollection->updateOne(availFilter, updateOperation);
-
-        // After updating availability, check for 80% threshold and best time slots
-        do {
-            Meeting meeting = check meetingRecord.cloneWithType(Meeting);
-            _ = check checkParticipantAvailabilityAndFindBestSlot(meeting);
-            _ = check checkAndFinalizeTimeSlot(meeting);
-        } on fail var e {
-            log:printError("External availability update threshold check failed", 'error = e);
-        }
 
         // Return the updated availability
         Availability updatedAvailability = {
@@ -3437,134 +3416,6 @@ service /api on ln {
         }
 
         return externalMeeting;
-    }
-
-    // External endpoint to get creator and hosts availability for a group or round robin meeting
-    resource function get hosts/availability/externally/[string meetingId]() returns CreatorHostsAvailability|ErrorResponse|error {
-        // Check if the meeting exists
-        map<json> meetingFilter = {
-            "id": meetingId
-        };
-
-        record {}|() meetingRecord = check mongodb:meetingCollection->findOne(meetingFilter);
-        if meetingRecord is () {
-            return {
-                message: "Meeting not found",
-                statusCode: 404
-            };
-        }
-
-        // Convert to Meeting type
-        json meetingJson = meetingRecord.toJson();
-        Meeting meeting = check meetingJson.cloneWithType(Meeting);
-
-        // Only allow for group and round robin meetings
-        if meeting.meetingType == "direct" {
-            return {
-                message: "This endpoint is only available for group and round robin meetings",
-                statusCode: 400
-            };
-        }
-
-        // Collect usernames of creator and hosts
-        string[] creatorAndHosts = [];
-        
-        // Add creator
-        creatorAndHosts.push(meeting.createdBy);
-
-        // Add hosts for round robin meetings
-        if meeting.meetingType == "round_robin" && meeting?.hosts is MeetingParticipant[] {
-            foreach MeetingParticipant host in meeting?.hosts ?: [] {
-                // Avoid duplicates if creator is also a host
-                boolean alreadyExists = false;
-                foreach string existingUser in creatorAndHosts {
-                    if existingUser == host.username {
-                        alreadyExists = true;
-                        break;
-                    }
-                }
-                
-                if !alreadyExists {
-                    creatorAndHosts.push(host.username);
-                }
-            }
-        }
-
-        // Get availability data from both collections
-        ParticipantAvailability[] availabilities = [];
-
-        foreach string username in creatorAndHosts {
-            // First check participantAvailabilityCollection
-            map<json> participantFilter = {
-                "username": username,
-                "meetingId": meetingId
-            };
-
-            record {}|() participantAvail = check mongodb:participantAvailabilityCollection->findOne(participantFilter);
-            
-            if participantAvail is record {} {
-                json availJson = participantAvail.toJson();
-                map<json> availJsonMap = <map<json>>availJson;
-
-                // Add submittedAt if not present
-                if !availJsonMap.hasKey("submittedAt") {
-                    availJsonMap["submittedAt"] = time:utcToString(time:utcNow());
-                }
-
-                ParticipantAvailability availability = check availJsonMap.cloneWithType(ParticipantAvailability);
-                availabilities.push(availability);
-            } else {
-                // If not found in participantAvailabilityCollection, check availabilityCollection
-                map<json> availFilter = {
-                    "username": username,
-                    "meetingId": meetingId
-                };
-
-                record {}|() availRecord = check mongodb:availabilityCollection->findOne(availFilter);
-                
-                if availRecord is record {} {
-                    json availJson = availRecord.toJson();
-                    Availability availability = check availJson.cloneWithType(Availability);
-                    
-                    // Convert Availability to ParticipantAvailability
-                    ParticipantAvailability participantAvailability = {
-                        id: availability.id,
-                        username: availability.username,
-                        meetingId: availability.meetingId,
-                        timeSlots: availability.timeSlots,
-                        submittedAt: time:utcToString(time:utcNow())
-                    };
-                    
-                    availabilities.push(participantAvailability);
-                }
-            }
-        }
-
-        // Check if there's a best time slot for this meeting
-        map<json> bestTimeSlotFilter = {
-            "meetingId": meetingId
-        };
-
-        record {}|() bestTimeSlotRecord = check mongodb:bestTimeSlotCollection->findOne(bestTimeSlotFilter);
-        BestTimeSlot? bestTimeSlot = ();
-
-        if bestTimeSlotRecord is record {} {
-            json bestTimeSlotJson = bestTimeSlotRecord.toJson();
-            bestTimeSlot = check bestTimeSlotJson.cloneWithType(BestTimeSlot);
-        }
-
-        // Create response
-        CreatorHostsAvailability response = {
-            meetingId: meetingId,
-            meetingTitle: meeting.title,
-            meetingType: meeting.meetingType,
-            creator: meeting.createdBy,
-            hosts: meeting?.hosts ?: [],
-            availabilities: availabilities,
-            bestTimeSlot: bestTimeSlot
-        };
-
-        return response;
     }
   
 }
