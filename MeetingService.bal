@@ -858,6 +858,12 @@ service /api on ln {
 
                 // Skip if already added
                 if (!meetingIds.hasKey(meeting.id)) {
+                    log:printInfo(string `📅 CONFIRMED MEETINGS: Adding manually confirmed meeting ${meeting.id}`);
+                    if (meeting?.directTimeSlot is TimeSlot) {
+                        TimeSlot confirmedSlot = <TimeSlot>meeting?.directTimeSlot;
+                        log:printInfo(string `   - Confirmed time slot: ${confirmedSlot.startTime} to ${confirmedSlot.endTime}`);
+                    }
+                    
                     // Determine role
                     if (meeting.createdBy == username) {
                         meeting["role"] = "creator";
@@ -916,6 +922,10 @@ service /api on ln {
 
                 // Try to auto-confirm this meeting
                 check checkAndFinalizeTimeSlot(meeting);
+                
+                // Note: Removed automatic "confirmation" behavior - only manually confirmed meetings 
+                // should appear in the confirmed meetings list. Pending meetings with best time slots
+                // should remain pending until manually confirmed by the user.
             };
 
         // 4. Run another query to get newly confirmed meetings
@@ -1016,6 +1026,11 @@ service /api on ln {
         foreach Meeting mtg in meetingsWithoutTime {
             sortedMeetings.push(mtg);
         }
+
+        log:printInfo(string `📅 CONFIRMED MEETINGS: Returning ${sortedMeetings.length()} manually confirmed meetings for user ${username}`);
+        log:printInfo(string `   - Only meetings manually confirmed via /confirm endpoint are included`);
+        log:printInfo(string `   - Meetings with time slots: ${meetingsWithTime.length()}`);
+        log:printInfo(string `   - Meetings without time slots: ${meetingsWithoutTime.length()}`);
 
         return sortedMeetings;
     }
