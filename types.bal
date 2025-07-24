@@ -66,6 +66,12 @@ public type CalendarConnectionResponse record {
     string message;
 };
 
+public type CalendarEventResponse record {
+    boolean success;
+    string message;
+    string eventId?;
+};
+
 public type EmailConfig record {
     string host;
     string username;
